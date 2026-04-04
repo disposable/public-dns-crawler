@@ -12,6 +12,8 @@ from resolver_inventory.cli import (
     _apply_probe_corpus_override,
     _build_parser,
     cmd_generate_probe_corpus,
+    cmd_materialize_results,
+    cmd_split_candidates,
     main,
 )
 from resolver_inventory.probe_corpus.models import GeneratedProbeCorpusResult, ProbeGenerationReport
@@ -30,10 +32,20 @@ class TestCliParser:
         args = parser.parse_args(["discover", "--output", "out.json"])
         assert args.output == "out.json"
 
+    def test_discover_with_filtered_output(self) -> None:
+        parser = _build_parser()
+        args = parser.parse_args(["discover", "--filtered-output", "filtered.json"])
+        assert args.filtered_output == "filtered.json"
+
     def test_validate_subcommand(self) -> None:
         parser = _build_parser()
         args = parser.parse_args(["validate"])
         assert args.command == "validate"
+
+    def test_validate_parallelism_override(self) -> None:
+        parser = _build_parser()
+        args = parser.parse_args(["validate", "--validation-parallelism", "5"])
+        assert args.validation_parallelism == 5
 
     def test_refresh_accepts_probe_corpus_override(self) -> None:
         parser = _build_parser()
@@ -53,6 +65,31 @@ class TestCliParser:
         parser = _build_parser()
         with pytest.raises(SystemExit):
             parser.parse_args(["export"])
+
+    def test_split_candidates_subcommand(self) -> None:
+        parser = _build_parser()
+        args = parser.parse_args(
+            ["split-candidates", "--input", "in.json", "--output-dir", "chunks"]
+        )
+        assert args.command == "split-candidates"
+        assert args.input == "in.json"
+        assert args.output_dir == "chunks"
+        assert args.shards == 10
+
+    def test_materialize_results_subcommand(self) -> None:
+        parser = _build_parser()
+        args = parser.parse_args(
+            [
+                "materialize-results",
+                "--inputs-glob",
+                "validated/*.json",
+                "--filtered-input",
+                "filtered.json",
+            ]
+        )
+        assert args.command == "materialize-results"
+        assert args.inputs_glob == "validated/*.json"
+        assert args.filtered_input == "filtered.json"
 
     def test_export_json(self) -> None:
         parser = _build_parser()
@@ -252,3 +289,136 @@ class TestGenerateProbeCorpusCommand:
         assert (tmp_path / "out" / "probe-corpus.yaml").exists()
         assert (tmp_path / "out" / "metadata.json").exists()
         assert (tmp_path / "out" / "SUMMARY.md").exists()
+
+
+class TestShardCommands:
+    def test_split_candidates_writes_even_shards(self, tmp_path: Path) -> None:
+        input_path = tmp_path / "candidates.json"
+        input_path.write_text(
+            json.dumps(
+                [
+                    {
+                        "provider": None,
+                        "source": "test",
+                        "transport": "dns-udp",
+                        "endpoint_url": None,
+                        "host": f"192.0.2.{index}",
+                        "port": 53,
+                        "path": None,
+                        "bootstrap_ipv4": [],
+                        "bootstrap_ipv6": [],
+                        "tls_server_name": None,
+                        "metadata": {},
+                    }
+                    for index in range(1, 6)
+                ]
+            ),
+            encoding="utf-8",
+        )
+
+        rc = cmd_split_candidates(
+            argparse.Namespace(
+                config=None,
+                input=str(input_path),
+                output_dir=str(tmp_path / "chunks"),
+                shards=3,
+            )
+        )
+
+        assert rc == 0
+        manifest = json.loads((tmp_path / "manifest.json").read_text(encoding="utf-8"))
+        assert manifest["shards"] == 3
+        assert manifest["total_candidates"] == 5
+        chunk_sizes = [
+            len(json.loads((tmp_path / "chunks" / f"chunk-{index:02d}.json").read_text()))
+            for index in range(3)
+        ]
+        assert chunk_sizes == [2, 2, 1]
+
+    def test_materialize_results_writes_outputs(self, tmp_path: Path) -> None:
+        filtered_path = tmp_path / "filtered.json"
+        filtered_path.write_text(
+            json.dumps(
+                [
+                    {
+                        "reason": "source_reliability_below_min",
+                        "detail": "below minimum",
+                        "stage": "source",
+                        "candidate": {
+                            "provider": None,
+                            "source": "publicdns_info",
+                            "transport": "dns-udp",
+                            "endpoint_url": None,
+                            "host": "192.0.2.200",
+                            "port": 53,
+                            "path": None,
+                            "bootstrap_ipv4": [],
+                            "bootstrap_ipv6": [],
+                            "tls_server_name": None,
+                            "metadata": {},
+                        },
+                    }
+                ]
+            ),
+            encoding="utf-8",
+        )
+        shard_dir = tmp_path / "validated"
+        shard_dir.mkdir()
+        for index, host in enumerate(["192.0.2.1", "192.0.2.2"]):
+            (shard_dir / f"shard-{index:02d}.json").write_text(
+                json.dumps(
+                    [
+                        {
+                            "status": "accepted",
+                            "score": 90,
+                            "accepted": True,
+                            "reasons": [],
+                            "candidate": {
+                                "provider": None,
+                                "source": "test",
+                                "transport": "dns-udp",
+                                "endpoint_url": None,
+                                "host": host,
+                                "port": 53,
+                                "path": None,
+                                "bootstrap_ipv4": [],
+                                "bootstrap_ipv6": [],
+                                "tls_server_name": None,
+                                "metadata": {},
+                            },
+                            "probes": [],
+                            "median_latency_ms": None,
+                        }
+                    ]
+                ),
+                encoding="utf-8",
+            )
+
+        config = tmp_path / "config.toml"
+        config.write_text(
+            "\n".join(
+                [
+                    "[export]",
+                    'formats = ["json", "text", "dnsdist"]',
+                    'output_dir = "outputs/latest"',
+                ]
+            ),
+            encoding="utf-8",
+        )
+
+        rc = cmd_materialize_results(
+            argparse.Namespace(
+                config=str(config),
+                inputs_glob=str(shard_dir / "*.json"),
+                filtered_input=str(filtered_path),
+                output=str(tmp_path / "out"),
+            )
+        )
+
+        assert rc == 0
+        assert (tmp_path / "out" / "validated.json").exists()
+        assert (tmp_path / "out" / "accepted.json").exists()
+        assert (tmp_path / "out" / "filtered.json").exists()
+        assert (tmp_path / "out" / "resolvers.txt").exists()
+        merged = json.loads((tmp_path / "out" / "validated.json").read_text(encoding="utf-8"))
+        assert [item["candidate"]["host"] for item in merged] == ["192.0.2.1", "192.0.2.2"]

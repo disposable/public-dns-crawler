@@ -2,59 +2,11 @@
 
 from __future__ import annotations
 
-import dataclasses
 import json
 from pathlib import Path
-from typing import Any
 
 from resolver_inventory.models import FilteredCandidate, ValidationResult
-
-
-def _to_dict(result: ValidationResult) -> dict[str, Any]:
-    c = result.candidate
-    return {
-        "status": result.status,
-        "score": result.score,
-        "accepted": result.accepted,
-        "reasons": result.reasons,
-        "candidate": {
-            "provider": c.provider,
-            "source": c.source,
-            "transport": c.transport,
-            "endpoint_url": c.endpoint_url,
-            "host": c.host,
-            "port": c.port,
-            "path": c.path,
-            "bootstrap_ipv4": c.bootstrap_ipv4,
-            "bootstrap_ipv6": c.bootstrap_ipv6,
-            "tls_server_name": c.tls_server_name,
-            "metadata": c.metadata,
-        },
-        "probes": [dataclasses.asdict(p) for p in result.probes],
-        "median_latency_ms": result.median_latency_ms(),
-    }
-
-
-def _filtered_to_dict(record: FilteredCandidate) -> dict[str, Any]:
-    c = record.candidate
-    return {
-        "reason": record.reason,
-        "detail": record.detail,
-        "stage": record.stage,
-        "candidate": {
-            "provider": c.provider,
-            "source": c.source,
-            "transport": c.transport,
-            "endpoint_url": c.endpoint_url,
-            "host": c.host,
-            "port": c.port,
-            "path": c.path,
-            "bootstrap_ipv4": c.bootstrap_ipv4,
-            "bootstrap_ipv6": c.bootstrap_ipv6,
-            "tls_server_name": c.tls_server_name,
-            "metadata": c.metadata,
-        },
-    }
+from resolver_inventory.serialization import filtered_candidate_to_dict, validation_result_to_dict
 
 
 def export_json(
@@ -69,7 +21,7 @@ def export_json(
     Returns the JSON string. If *path* is given, also writes it to disk.
     """
     records = [r for r in results if r.accepted] if accepted_only else results
-    payload = [_to_dict(r) for r in records]
+    payload = [validation_result_to_dict(r) for r in records]
     text = json.dumps(payload, indent=indent, ensure_ascii=False)
     if path is not None:
         out = Path(path)
@@ -85,7 +37,7 @@ def export_filtered_json(
     indent: int = 2,
 ) -> str:
     """Serialize filtered candidates to JSON."""
-    payload = [_filtered_to_dict(record) for record in records]
+    payload = [filtered_candidate_to_dict(record) for record in records]
     text = json.dumps(payload, indent=indent, ensure_ascii=False)
     if path is not None:
         out = Path(path)

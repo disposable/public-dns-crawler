@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 import argparse
+import glob
+import json
 import os
 import sys
 import time
@@ -16,6 +18,8 @@ logger = get_logger(__name__)
 if TYPE_CHECKING:
     from resolver_inventory.settings import Settings
     from resolver_inventory.validate import ValidationProgress
+
+DEFAULT_SHARD_COUNT = 10
 
 
 def _github_output(name: str, value: str) -> None:
@@ -79,76 +83,73 @@ def _apply_probe_corpus_override(args: argparse.Namespace, settings: Settings) -
     settings.validation.corpus.mode = "external"
 
 
+def _apply_validation_parallelism_override(args: argparse.Namespace, settings: Settings) -> None:
+    parallelism = getattr(args, "validation_parallelism", None)
+    if parallelism is None:
+        return
+    settings.validation.parallelism = parallelism
+
+
+def _candidate_sort_key(candidate) -> tuple[str, str, str, int, str]:
+    return (
+        candidate.transport,
+        candidate.endpoint_url or "",
+        candidate.host,
+        candidate.port,
+        candidate.path or "",
+    )
+
+
 # ---------------------------------------------------------------------------
 # Sub-command handlers
 # ---------------------------------------------------------------------------
 
 
 def cmd_discover(args: argparse.Namespace) -> int:
+    from resolver_inventory.export.json import export_filtered_json
     from resolver_inventory.normalize.dns import normalize_dns_candidates
     from resolver_inventory.normalize.doh import normalize_doh_candidates
+    from resolver_inventory.serialization import candidate_to_dict, write_json
     from resolver_inventory.settings import load_settings
-    from resolver_inventory.sources import discover_candidates
+    from resolver_inventory.sources import discover_candidates_with_filtered
 
     settings = load_settings(args.config)
-    candidates = discover_candidates(settings)
-    dns_c = normalize_dns_candidates(candidates)
-    doh_c = normalize_doh_candidates(candidates)
+    discovery = discover_candidates_with_filtered(settings)
+    filtered_candidates = list(discovery.filtered)
+    dns_c = normalize_dns_candidates(discovery.candidates, filtered=filtered_candidates)
+    doh_c = normalize_doh_candidates(discovery.candidates, filtered=filtered_candidates)
     all_c = dns_c + doh_c
     logger.info("Discovered %d candidates (%d DNS, %d DoH)", len(all_c), len(dns_c), len(doh_c))
+    _github_output("candidates_total", str(len(all_c)))
+    _github_output("filtered_total", str(len(filtered_candidates)))
 
     if args.output:
-        import json
-
-        out = Path(args.output)
-        out.parent.mkdir(parents=True, exist_ok=True)
-        payload = [
-            {
-                "provider": c.provider,
-                "source": c.source,
-                "transport": c.transport,
-                "host": c.host,
-                "port": c.port,
-                "endpoint_url": c.endpoint_url,
-                "path": c.path,
-            }
-            for c in all_c
-        ]
-        out.write_text(json.dumps(payload, indent=2), encoding="utf-8")
+        write_json(args.output, [candidate_to_dict(candidate) for candidate in all_c])
         logger.info("Wrote candidates to %s", args.output)
+        _github_output("output_path", str(Path(args.output).resolve()))
+    if args.filtered_output:
+        export_filtered_json(filtered_candidates, path=args.filtered_output)
+        logger.info("Wrote filtered candidates to %s", args.filtered_output)
+        _github_output("filtered_path", str(Path(args.filtered_output).resolve()))
     return 0
 
 
 def cmd_validate(args: argparse.Namespace) -> int:
-    import json
-
     from resolver_inventory.export.json import export_json
     from resolver_inventory.normalize.dns import normalize_dns_candidates
     from resolver_inventory.normalize.doh import normalize_doh_candidates
+    from resolver_inventory.serialization import candidate_from_dict, load_json_list
     from resolver_inventory.settings import load_settings
     from resolver_inventory.sources import discover_candidates
     from resolver_inventory.validate import validate_candidates
 
     settings = load_settings(args.config)
     _apply_probe_corpus_override(args, settings)
+    _apply_validation_parallelism_override(args, settings)
 
     _github_group("Discovery")
     if args.input:
-        raw = json.loads(Path(args.input).read_text())
-        from resolver_inventory.models import Candidate
-
-        candidates = [
-            Candidate(
-                provider=r.get("provider"),
-                source=r.get("source", "loaded"),
-                transport=r["transport"],
-                endpoint_url=r.get("endpoint_url"),
-                host=r["host"],
-                port=r["port"],
-                path=r.get("path"),
-            )
-            for r in raw
-        ]
+        candidates = [candidate_from_dict(record) for record in load_json_list(args.input)]
         logger.info("Loaded %d candidates from %s", len(candidates), args.input)
     else:
         raw_candidates = discover_candidates(settings)
@@ -195,6 +196,120 @@ def cmd_validate(args: argparse.Namespace) -> int:
     _github_output("output_path", str(Path(out_path).resolve()))
     _github_endgroup()
 
+    return 0
+
+
+def cmd_split_candidates(args: argparse.Namespace) -> int:
+    from resolver_inventory.serialization import (
+        candidate_from_dict,
+        candidate_to_dict,
+        load_json_list,
+        write_json,
+    )
+
+    candidates = [candidate_from_dict(record) for record in load_json_list(args.input)]
+    candidates.sort(key=_candidate_sort_key)
+
+    output_dir = Path(args.output_dir)
+    output_dir.mkdir(parents=True, exist_ok=True)
+    shard_count = args.shards
+    total = len(candidates)
+    base_size, remainder = divmod(total, shard_count)
+    files: list[str] = []
+    start = 0
+
+    for shard_index in range(shard_count):
+        shard_size = base_size + (1 if shard_index < remainder else 0)
+        shard_candidates = candidates[start : start + shard_size]
+        start += shard_size
+        shard_path = output_dir / f"chunk-{shard_index:02d}.json"
+        write_json(shard_path, [candidate_to_dict(candidate) for candidate in shard_candidates])
+        files.append(shard_path.name)
+
+    manifest = {
+        "shards": shard_count,
+        "total_candidates": total,
+        "files": files,
+    }
+    manifest_path = output_dir.parent / "manifest.json"
+    write_json(manifest_path, manifest)
+
+    _github_output("shards", str(shard_count))
+    _github_output("total_candidates", str(total))
+    _github_output("manifest_path", str(manifest_path.resolve()))
+    _github_output("chunks_dir", str(output_dir.resolve()))
+    logger.info("Wrote %d shards to %s", shard_count, output_dir)
+    return 0
+
+
+def cmd_materialize_results(args: argparse.Namespace) -> int:
+    from resolver_inventory.export.dnsdist import export_dnsdist
+    from resolver_inventory.export.json import export_filtered_json, export_json
+    from resolver_inventory.export.text import export_text
+    from resolver_inventory.export.unbound import export_unbound
+    from resolver_inventory.serialization import (
+        filtered_candidate_from_dict,
+        load_json_list,
+        validation_result_from_dict,
+    )
+    from resolver_inventory.settings import load_settings
+
+    settings = load_settings(args.config)
+    out_dir = Path(args.output or settings.export.output_dir)
+    out_dir.mkdir(parents=True, exist_ok=True)
+
+    filtered_candidates = [
+        filtered_candidate_from_dict(record) for record in load_json_list(args.filtered_input)
+    ]
+
+    shard_paths = [Path(path) for path in sorted(glob.glob(args.inputs_glob))]
+    if not shard_paths:
+        logger.error("No validated shard files matched %s", args.inputs_glob)
+        return 1
+    results = []
+    for shard_path in shard_paths:
+        results.extend(validation_result_from_dict(record) for record in load_json_list(shard_path))
+
+    accepted_status = sum(1 for result in results if result.status == "accepted")
+    candidate_status = sum(1 for result in results if result.status == "candidate")
+    rejected_status = sum(1 for result in results if result.status == "rejected")
+
+    exported_files: list[str] = []
+    filtered_path = out_dir / "filtered.json"
+    export_filtered_json(filtered_candidates, path=filtered_path)
+    exported_files.append(str(filtered_path))
+
+    formats = settings.export.formats
+    if "json" in formats:
+        validated_path = out_dir / "validated.json"
+        accepted_path = out_dir / "accepted.json"
+        export_json(results, accepted_only=False, path=validated_path)
+        export_json(results, accepted_only=True, path=accepted_path)
+        exported_files.extend([str(validated_path), str(accepted_path)])
+    if "text" in formats:
+        resolvers_path = out_dir / "resolvers.txt"
+        doh_path = out_dir / "resolvers-doh.txt"
+        export_text(results, path=resolvers_path)
+        export_text(results, include_doh=True, path=doh_path)
+        exported_files.extend([str(resolvers_path), str(doh_path)])
+    if "dnsdist" in formats:
+        dnsdist_path = out_dir / "dnsdist.conf"
+        export_dnsdist(results, path=dnsdist_path)
+        exported_files.append(str(dnsdist_path))
+    if "unbound" in formats:
+        unbound_path = out_dir / "unbound-forward.conf"
+        export_unbound(results, path=unbound_path)
+        exported_files.append(str(unbound_path))
+
+    _github_output("results_accepted", str(accepted_status))
+    _github_output("results_candidate", str(candidate_status))
+    _github_output("results_rejected", str(rejected_status))
+    _github_output("results_total", str(len(results)))
+    _github_output("filtered_total", str(len(filtered_candidates)))
+    _github_output("output_dir", str(out_dir.resolve()))
+    _github_output("exported_files", ",".join(exported_files))
+    _github_output("validated_shards", str(len(shard_paths)))
+    logger.info("Materialized %d validation results into %s", len(results), out_dir)
     return 0
 
 
@@ -295,8 +410,6 @@ def cmd_refresh(args: argparse.Namespace) -> int:
 
 
 def cmd_validate_probe_corpus(args: argparse.Namespace) -> int:
-    import json
-
     from resolver_inventory.probe_corpus.schema import parse_probe_corpus
     from resolver_inventory.probe_corpus.validators import validate_probe_corpus
     from resolver_inventory.settings import load_settings
@@ -350,58 +463,19 @@ def cmd_generate_probe_corpus(args: argparse.Namespace) -> int:
 
 
 def cmd_export(args: argparse.Namespace) -> int:
-    import json
-
     from resolver_inventory.export.dnsdist import export_dnsdist
     from resolver_inventory.export.json import export_json
     from resolver_inventory.export.text import export_text
     from resolver_inventory.export.unbound import export_unbound
-    from resolver_inventory.models import Candidate, ProbeResult, ValidationResult
+    from resolver_inventory.serialization import load_json_list, validation_result_from_dict
 
     in_path = args.input or "outputs/validated.json"
 
     try:
-        raw_results = json.loads(Path(in_path).read_text())
+        results = [validation_result_from_dict(item) for item in load_json_list(in_path)]
     except FileNotFoundError:
         logger.error("Input file not found: %s — run 'validate' first", in_path)
         return 1
-
-    results: list[ValidationResult] = []
-    for item in raw_results:
-        c_data = item["candidate"]
-        candidate = Candidate(
-            provider=c_data.get("provider"),
-            source=c_data.get("source", "loaded"),
-            transport=c_data["transport"],
-            endpoint_url=c_data.get("endpoint_url"),
-            host=c_data["host"],
-            port=c_data["port"],
-            path=c_data.get("path"),
-            bootstrap_ipv4=c_data.get("bootstrap_ipv4", []),
-            bootstrap_ipv6=c_data.get("bootstrap_ipv6", []),
-            tls_server_name=c_data.get("tls_server_name"),
-            metadata=c_data.get("metadata", {}),
-        )
-        probes = [
-            ProbeResult(
-                ok=p["ok"],
-                probe=p["probe"],
-                latency_ms=p.get("latency_ms"),
-                error=p.get("error"),
-                details=p.get("details", {}),
-            )
-            for p in item.get("probes", [])
-        ]
-        results.append(
-            ValidationResult(
-                candidate=candidate,
-                accepted=item["accepted"],
-                score=item["score"],
-                status=item["status"],
-                reasons=item["reasons"],
-                probes=probes,
-            )
-        )
 
     fmt = args.format
     out = args.output
@@ -452,6 +526,11 @@ def _build_parser() -> argparse.ArgumentParser:
         "discover", parents=[common], help="Gather raw candidates from all sources"
     )
     p_discover.add_argument("--output", "-o", metavar="FILE", help="Write candidates JSON here")
+    p_discover.add_argument(
+        "--filtered-output",
+        metavar="FILE",
+        help="Write filtered candidates JSON here",
+    )
 
     # validate
     p_validate = sub.add_parser(
@@ -464,6 +543,12 @@ def _build_parser() -> argparse.ArgumentParser:
         metavar="FILE",
         help="Load validation probes from a local JSON corpus file",
     )
+    p_validate.add_argument(
+        "--validation-parallelism",
+        type=int,
+        metavar="INT",
+        help="Override validation parallelism for this run",
+    )
 
     # refresh
     p_refresh = sub.add_parser(
@@ -475,6 +560,45 @@ def _build_parser() -> argparse.ArgumentParser:
         metavar="FILE",
         help="Load validation probes from a local JSON corpus file",
     )
+
+    p_split = sub.add_parser(
+        "split-candidates",
+        parents=[common],
+        help="Deterministically split discovered candidates into shard files",
+    )
+    p_split.add_argument("--input", required=True, metavar="FILE", help="Candidates JSON file")
+    p_split.add_argument(
+        "--output-dir",
+        required=True,
+        metavar="DIR",
+        help="Directory for chunk-XX.json files",
+    )
+    p_split.add_argument(
+        "--shards",
+        type=int,
+        default=DEFAULT_SHARD_COUNT,
+        metavar="INT",
+        help=f"Number of shards to write (default: {DEFAULT_SHARD_COUNT})",
+    )
+
+    p_materialize = sub.add_parser(
+        "materialize-results",
+        parents=[common],
+        help="Merge validated shard results and regenerate final exports",
+    )
+    p_materialize.add_argument(
+        "--inputs-glob",
+        required=True,
+        metavar="GLOB",
+        help="Glob for validated shard JSON inputs",
+    )
+    p_materialize.add_argument(
+        "--filtered-input",
+        required=True,
+        metavar="FILE",
+        help="Filtered candidates JSON file from discovery stage",
+    )
+    p_materialize.add_argument("--output", "-o", metavar="DIR", help="Output directory")
 
     # export
     p_export = sub.add_parser(
@@ -540,6 +664,8 @@ def main(argv: list[str] | None = None) -> None:
         "discover": cmd_discover,
         "validate": cmd_validate,
         "refresh": cmd_refresh,
+        "split-candidates": cmd_split_candidates,
+        "materialize-results": cmd_materialize_results,
         "export": cmd_export,
         "generate-probe-corpus": cmd_generate_probe_corpus,
         "validate-probe-corpus": cmd_validate_probe_corpus,
