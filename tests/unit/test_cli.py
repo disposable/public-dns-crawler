@@ -44,8 +44,8 @@ class TestCliParser:
 
     def test_validate_parallelism_override(self) -> None:
         parser = _build_parser()
-        args = parser.parse_args(["validate", "--validation-parallelism", "5"])
-        assert args.validation_parallelism == 5
+        args = parser.parse_args(["validate", "--validation-parallelism", "100"])
+        assert args.validation_parallelism == 100
 
     def test_refresh_accepts_probe_corpus_override(self) -> None:
         parser = _build_parser()

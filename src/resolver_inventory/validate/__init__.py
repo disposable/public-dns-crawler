@@ -14,6 +14,7 @@ from dataclasses import dataclass
 
 from resolver_inventory.models import Candidate, ValidationResult
 from resolver_inventory.settings import Settings
+from resolver_inventory.validate.base import resolve_baseline_answers
 from resolver_inventory.validate.corpus import build_corpus
 from resolver_inventory.validate.dns_plain import validate_dns_candidate
 from resolver_inventory.validate.doh import validate_doh_candidate
@@ -68,6 +69,22 @@ async def _validate_all(
 ) -> list[ValidationResult]:
     corpus = build_corpus(settings.validation.corpus)
     baseline_cache: dict[tuple[str, str], list[str]] = {}
+    timeout_s = settings.validation.timeout_ms / 1000.0
+
+    # Pre-populate baseline cache for fixed-qname consensus_match entries so that
+    # parallel probes within a candidate all hit the cache instead of each firing
+    # redundant baseline queries.
+    for entry in corpus.positive:
+        if entry.expected_mode == "consensus_match" and entry.qname:
+            with contextlib.suppress(Exception):
+                await resolve_baseline_answers(
+                    entry.qname,
+                    entry.rdtype,
+                    settings.validation.baseline_resolvers,
+                    timeout_s,
+                    baseline_cache,
+                )
+
     total = len(candidates)
     if total == 0:
         return []

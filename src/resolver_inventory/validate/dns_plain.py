@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import time
 
 import dns.asyncquery
@@ -144,14 +145,14 @@ async def validate_dns_candidate(
     transport = candidate.transport
     host = candidate.host
     port = candidate.port
-    probes: list[ProbeResult] = []
     baseline_resolvers = baseline_resolvers or ["1.1.1.1", "9.9.9.9", "8.8.8.8"]
     baseline_cache = baseline_cache or {}
 
+    coros = []
     for _ in range(rounds):
         for entry in corpus.positive:
-            probes.append(
-                await _probe_positive(
+            coros.append(
+                _probe_positive(
                     entry,
                     host,
                     port,
@@ -162,6 +163,6 @@ async def validate_dns_candidate(
                 )
             )
         for entry in corpus.nxdomain:
-            probes.append(await _probe_nxdomain(entry, host, port, transport, timeout_s))
+            coros.append(_probe_nxdomain(entry, host, port, transport, timeout_s))
 
-    return probes
+    return list(await asyncio.gather(*coros))

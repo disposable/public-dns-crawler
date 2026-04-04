@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import ssl
 import time
 
@@ -171,34 +172,38 @@ async def validate_doh_candidate(
 ) -> list[ProbeResult]:
     """Run all DoH probes against a DoH candidate."""
     url = candidate.endpoint_url or ""
-    probes: list[ProbeResult] = []
     baseline_resolvers = baseline_resolvers or ["1.1.1.1", "9.9.9.9", "8.8.8.8"]
     baseline_cache = baseline_cache or {}
 
     verify: bool | ssl.SSLContext = ssl_context if ssl_context is not None else True
 
-    probes.append(await _probe_tls(candidate, timeout_s, ssl_context))
-
-    async with httpx.AsyncClient(
-        http2=True,
-        timeout=httpx.Timeout(timeout_s),
-        verify=verify,
-        follow_redirects=False,
-        headers={"Accept": DOH_CONTENT_TYPE},
-    ) as client:
-        for _ in range(rounds):
-            for entry in corpus.positive:
-                probes.append(
-                    await _probe_positive_doh(
-                        entry,
-                        client,
-                        url,
-                        timeout_s,
-                        baseline_resolvers,
-                        baseline_cache,
+    async def _run_probes() -> list[ProbeResult]:
+        async with httpx.AsyncClient(
+            http2=True,
+            timeout=httpx.Timeout(timeout_s),
+            verify=verify,
+            follow_redirects=False,
+            headers={"Accept": DOH_CONTENT_TYPE},
+        ) as client:
+            coros = []
+            for _ in range(rounds):
+                for entry in corpus.positive:
+                    coros.append(
+                        _probe_positive_doh(
+                            entry,
+                            client,
+                            url,
+                            timeout_s,
+                            baseline_resolvers,
+                            baseline_cache,
+                        )
                     )
-                )
-            for entry in corpus.nxdomain:
-                probes.append(await _probe_nxdomain_doh(entry, client, url))
+                for entry in corpus.nxdomain:
+                    coros.append(_probe_nxdomain_doh(entry, client, url))
+            return list(await asyncio.gather(*coros))
 
-    return probes
+    tls_result, probe_results = await asyncio.gather(
+        _probe_tls(candidate, timeout_s, ssl_context),
+        _run_probes(),
+    )
+    return [tls_result, *probe_results]
