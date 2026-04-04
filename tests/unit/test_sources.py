@@ -5,8 +5,10 @@ from __future__ import annotations
 import urllib.request
 
 from resolver_inventory.settings import SourceEntry
-from resolver_inventory.sources.adguard import AdGuardSource, PROVIDERS_URL as ADGUARD_URL
-from resolver_inventory.sources.curl_wiki import CurlWikiSource, PROVIDERS_URL as CURL_URL
+from resolver_inventory.sources.adguard import PROVIDERS_URL as ADGUARD_URL
+from resolver_inventory.sources.adguard import AdGuardSource
+from resolver_inventory.sources.curl_wiki import PROVIDERS_URL as CURL_URL
+from resolver_inventory.sources.curl_wiki import CurlWikiSource
 
 
 class _FakeResponse:
@@ -31,7 +33,8 @@ class TestCurlWikiSource:
         seen: list[str] = []
         body = """
 | Who runs it | Base URL |
-| [Provider A](https://example.com/) | https://one.example/dns-query<br>https://two.example/dns-query |
+| [Provider A](https://example.com/) |
+| https://one.example/dns-query<br>https://two.example/dns-query |
 """
 
         def fake_urlopen(url: str, timeout: int = 30) -> _FakeResponse:
@@ -62,8 +65,8 @@ class TestAdGuardSource:
 
 | Protocol       | Address                                     |                |
 |----------------|---------------------------------------------|----------------|
-| DNS-over-HTTPS | `https://dns.adguard-dns.com/dns-query`     | [Add](adguard:add_dns_server?address=https://dns.adguard-dns.com/dns-query&name=AdGuard%20DNS) |
-| DNS-over-HTTPS | `https://family.adguard-dns.com/dns-query`  | [Add](adguard:add_dns_server?address=https://family.adguard-dns.com/dns-query&name=AdGuard%20DNS) |
+| DNS-over-HTTPS | `https://dns.adguard-dns.com/dns-query`     | |
+| DNS-over-HTTPS | `https://family.adguard-dns.com/dns-query`  | |
 """
 
         def fake_urlopen(url: str, timeout: int = 30) -> _FakeResponse:
