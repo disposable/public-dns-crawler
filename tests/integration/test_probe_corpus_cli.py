@@ -49,7 +49,7 @@ def _write_config_file(path: Path, seed_path: Path, resolver: str) -> None:
         "\n".join(
             [
                 "[probe_corpus]",
-                'schema_version = 2',
+                "schema_version = 2",
                 'corpus_version = "integration-cli"',
                 f'seed_path = "{seed_path.as_posix()}"',
                 "",
