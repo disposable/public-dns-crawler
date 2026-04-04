@@ -134,7 +134,7 @@ uv run ruff check .
 uv run ruff format .
 
 # Type-check (Python 3.14.x)
-uv run mypy src
+uv run pyright
 
 # Build the package
 uv build
