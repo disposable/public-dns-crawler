@@ -5,6 +5,7 @@ Aggregate, validate, score, and export public DNS and DoH resolvers.
 ## Features
 
 - **Multi-source discovery** - plain DNS from public-dns.info, DoH from curl wiki and AdGuard provider lists, manual seed files
+- **Pre-validation filtering records** - source and normalization drops are exported as `filtered.json` with reason codes
 - **Full endpoint metadata** - DoH records preserve URL, host, port, path, TLS server name, bootstrap IPs, and provenance
 - **Active validation** - reachability, NXDOMAIN fidelity, latency, consistency, TLS validity
 - **Pluggable test corpus** - controlled zone, local external JSON corpus, or tiny built-in fallback
@@ -53,6 +54,8 @@ cat outputs/latest/dnsdist.conf
 resolver-inventory discover   # gather raw candidates
 resolver-inventory validate   # run probes, emit scored records
 resolver-inventory refresh    # full pipeline (discover + validate + export)
+resolver-inventory split-candidates     # deterministic candidate sharding
+resolver-inventory materialize-results  # merge validated shards and export outputs
 resolver-inventory validate-probe-corpus --input FILE
 resolver-inventory generate-probe-corpus [--config FILE] [--seed-file FILE] [--output DIR]
 resolver-inventory export json     [--input FILE] [--output FILE]
@@ -61,9 +64,18 @@ resolver-inventory export dnsdist  [--input FILE] [--output FILE]
 resolver-inventory export unbound  [--input FILE] [--output FILE]
 ```
 
-Global flags: `--config FILE`, `--log-level {DEBUG,INFO,WARNING,ERROR}`
+Global flags: `--config FILE`, `--log-level {DEBUG,INFO,WARNING,ERROR}`.
 
-Validation commands also support `--probe-corpus FILE`. When provided, the CLI sets `validation.corpus.mode = "external"` and loads probes from that local JSON file.
+Validation commands also support `--probe-corpus FILE` and `--validation-parallelism N`. When `--probe-corpus` is provided, the CLI sets `validation.corpus.mode = "external"` and loads probes from that local JSON file.
+
+### Staged pipeline commands
+
+For multi-VM flows (for example GitHub Actions matrix validation), use:
+
+1. `discover --output candidates.json --filtered-output filtered.json`
+2. `split-candidates --input candidates.json --output-dir chunks --shards 10`
+3. `validate --input chunks/chunk-XX.json --output shard-XX.json`
+4. `materialize-results --inputs-glob "shards/*.json" --filtered-input filtered.json --output outputs/latest`
 
 ## Library API
 
@@ -317,6 +329,14 @@ uv run resolver-inventory refresh \
   7. run optional non-blocking network canaries
 
 Required PR checks never touch public resolvers.
+
+## History and reporting scripts
+
+These helper scripts are used by the parent data repo workflow and are intentionally separate from the main CLI:
+
+- `scripts/apply_history_quarantine.py` - drops currently quarantined plain DNS hosts from discovered candidates and appends `historical_dns_quarantine` entries to `filtered.json`
+- `scripts/update_history.py` - updates `meta/history.duckdb` from `validated.json`, `filtered.json`, and build metadata
+- `scripts/generate_stats_report.py` - regenerates the `<!-- GENERATED_STATS_* -->` README statistics section from history data
 
 ## License
 
