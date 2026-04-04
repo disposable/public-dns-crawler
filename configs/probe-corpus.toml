@@ -2,9 +2,6 @@
 schema_version = 2
 corpus_version = "dev"
 seed_path = "configs/probe-corpus-seeds.json"
-min_exact_probes = 8
-min_consensus_probes = 3
-min_negative_parents = 4
 
 [probe_corpus.baseline]
 resolvers = ["1.1.1.1", "9.9.9.9", "8.8.8.8"]
@@ -17,3 +14,22 @@ validation_rounds = 3
 [probe_corpus.selection]
 max_per_operator_family = 3
 max_per_tld = 3
+
+[probe_corpus.validation.exact]
+rounds = 2
+required_quorum = 2
+
+[probe_corpus.validation.consensus]
+rounds = 2
+required_quorum = 2
+
+[probe_corpus.validation.negative]
+rounds = 3
+labels_per_parent = 3
+required_quorum = 2
+label_length = 40
+
+[probe_corpus.thresholds]
+min_positive_exact = 6
+min_positive_consensus = 3
+min_negative_generated = 3

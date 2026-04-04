@@ -14,6 +14,8 @@ from resolver_inventory.cli import (
     cmd_generate_probe_corpus,
     main,
 )
+from resolver_inventory.probe_corpus.models import GeneratedProbeCorpusResult, ProbeGenerationReport
+from resolver_inventory.probe_corpus.schema import ProbeCorpus, ProbeDefinition
 
 
 class TestCliParser:
@@ -175,9 +177,6 @@ class TestGenerateProbeCorpusCommand:
                 [
                     "[probe_corpus]",
                     'seed_path = "configs/probe-corpus-seeds.json"',
-                    "min_exact_probes = 4",
-                    "min_consensus_probes = 3",
-                    "min_negative_parents = 1",
                     "",
                     "[probe_corpus.baseline]",
                     'resolvers = ["127.0.0.1:53"]',
@@ -186,13 +185,58 @@ class TestGenerateProbeCorpusCommand:
                     'parent_zones = ["com."]',
                     "label_length = 40",
                     "validation_rounds = 1",
+                    "",
+                    "[probe_corpus.thresholds]",
+                    "min_positive_exact = 1",
+                    "min_positive_consensus = 1",
+                    "min_negative_generated = 1",
                 ]
             ),
             encoding="utf-8",
         )
+        fake_result = GeneratedProbeCorpusResult(
+            corpus=ProbeCorpus(
+                schema_version=2,
+                corpus_version="test",
+                generated_at="2026-04-04T00:00:00Z",
+                generator_version="0.1.0",
+                sources_used=["unit-test"],
+                probe_counts={
+                    "positive_exact": 1,
+                    "positive_consensus": 1,
+                    "negative_generated": 1,
+                },
+                probes=[
+                    ProbeDefinition(
+                        id="probe-a",
+                        kind="positive_exact",
+                        qname="example.com.",
+                        qtype="A",
+                        expected_mode="exact_rrset",
+                        expected_answers=["192.0.2.1"],
+                    )
+                ],
+            ),
+            report=ProbeGenerationReport(
+                total_candidates=3,
+                accepted_count=3,
+                rejected_count=0,
+                candidate_counts={
+                    "positive_exact": 1,
+                    "positive_consensus": 1,
+                    "negative_generated": 1,
+                },
+                accepted_counts={
+                    "positive_exact": 1,
+                    "positive_consensus": 1,
+                    "negative_generated": 1,
+                },
+                baseline_resolvers_used=["127.0.0.1:53"],
+            ),
+        )
         monkeypatch.setattr(
-            "resolver_inventory.probe_corpus.generator.validate_negative_parent_zone",
-            lambda **kwargs: True,
+            "resolver_inventory.probe_corpus.generator.generate_probe_corpus",
+            lambda config, seed_snapshot: fake_result,
         )
 
         rc = cmd_generate_probe_corpus(

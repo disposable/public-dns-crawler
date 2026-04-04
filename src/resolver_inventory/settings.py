@@ -61,16 +61,55 @@ class ProbeCorpusSelectionConfig:
 
 
 @dataclass
+class ProbeCorpusExactValidationConfig:
+    rounds: int = 2
+    required_quorum: int = 2
+
+
+@dataclass
+class ProbeCorpusConsensusValidationConfig:
+    rounds: int = 2
+    required_quorum: int = 2
+
+
+@dataclass
+class ProbeCorpusNegativeValidationConfig:
+    rounds: int = 3
+    labels_per_parent: int = 3
+    required_quorum: int = 2
+    label_length: int = 40
+
+
+@dataclass
+class ProbeCorpusValidationConfig:
+    exact: ProbeCorpusExactValidationConfig = field(
+        default_factory=ProbeCorpusExactValidationConfig
+    )
+    consensus: ProbeCorpusConsensusValidationConfig = field(
+        default_factory=ProbeCorpusConsensusValidationConfig
+    )
+    negative: ProbeCorpusNegativeValidationConfig = field(
+        default_factory=ProbeCorpusNegativeValidationConfig
+    )
+
+
+@dataclass
+class ProbeCorpusThresholdsConfig:
+    min_positive_exact: int = 6
+    min_positive_consensus: int = 3
+    min_negative_generated: int = 3
+
+
+@dataclass
 class ProbeCorpusConfig:
     schema_version: int = 2
     corpus_version: str = "dev"
     seed_path: str | None = None
-    min_exact_probes: int = 8
-    min_consensus_probes: int = 4
-    min_negative_parents: int = 4
     baseline: BaselineConfig = field(default_factory=BaselineConfig)
     negative: ProbeCorpusNegativeConfig = field(default_factory=ProbeCorpusNegativeConfig)
     selection: ProbeCorpusSelectionConfig = field(default_factory=ProbeCorpusSelectionConfig)
+    validation: ProbeCorpusValidationConfig = field(default_factory=ProbeCorpusValidationConfig)
+    thresholds: ProbeCorpusThresholdsConfig = field(default_factory=ProbeCorpusThresholdsConfig)
 
 
 @dataclass
@@ -174,9 +213,6 @@ def load_settings(path: str | Path | None = None) -> Settings:
         pc.corpus_version = str(p.get("corpus_version", pc.corpus_version))
         seed_path = p.get("seed_path", pc.seed_path)
         pc.seed_path = None if seed_path is None else str(seed_path)
-        pc.min_exact_probes = int(p.get("min_exact_probes", pc.min_exact_probes))
-        pc.min_consensus_probes = int(p.get("min_consensus_probes", pc.min_consensus_probes))
-        pc.min_negative_parents = int(p.get("min_negative_parents", pc.min_negative_parents))
         if "baseline" in p:
             pc.baseline.resolvers = list(p["baseline"].get("resolvers", pc.baseline.resolvers))
         if "negative" in p:
@@ -192,5 +228,65 @@ def load_settings(path: str | Path | None = None) -> Settings:
                 sel.get("max_per_operator_family", pc.selection.max_per_operator_family)
             )
             pc.selection.max_per_tld = int(sel.get("max_per_tld", pc.selection.max_per_tld))
+        if "validation" in p:
+            validation = p["validation"]
+            if "exact" in validation:
+                exact = validation["exact"]
+                pc.validation.exact.rounds = int(exact.get("rounds", pc.validation.exact.rounds))
+                pc.validation.exact.required_quorum = int(
+                    exact.get("required_quorum", pc.validation.exact.required_quorum)
+                )
+            if "consensus" in validation:
+                consensus = validation["consensus"]
+                pc.validation.consensus.rounds = int(
+                    consensus.get("rounds", pc.validation.consensus.rounds)
+                )
+                pc.validation.consensus.required_quorum = int(
+                    consensus.get("required_quorum", pc.validation.consensus.required_quorum)
+                )
+            if "negative" in validation:
+                negative = validation["negative"]
+                pc.validation.negative.rounds = int(
+                    negative.get("rounds", pc.validation.negative.rounds)
+                )
+                pc.validation.negative.labels_per_parent = int(
+                    negative.get(
+                        "labels_per_parent",
+                        pc.validation.negative.labels_per_parent,
+                    )
+                )
+                pc.validation.negative.required_quorum = int(
+                    negative.get(
+                        "required_quorum",
+                        pc.validation.negative.required_quorum,
+                    )
+                )
+                pc.validation.negative.label_length = int(
+                    negative.get("label_length", pc.validation.negative.label_length)
+                )
+        if "thresholds" in p:
+            thresholds = p["thresholds"]
+            pc.thresholds.min_positive_exact = int(
+                thresholds.get("min_positive_exact", pc.thresholds.min_positive_exact)
+            )
+            pc.thresholds.min_positive_consensus = int(
+                thresholds.get(
+                    "min_positive_consensus",
+                    pc.thresholds.min_positive_consensus,
+                )
+            )
+            pc.thresholds.min_negative_generated = int(
+                thresholds.get(
+                    "min_negative_generated",
+                    pc.thresholds.min_negative_generated,
+                )
+            )
+        # Backward-compatible aliases from the previous phase.
+        if "min_exact_probes" in p:
+            pc.thresholds.min_positive_exact = int(p["min_exact_probes"])
+        if "min_consensus_probes" in p:
+            pc.thresholds.min_positive_consensus = int(p["min_consensus_probes"])
+        if "min_negative_parents" in p:
+            pc.thresholds.min_negative_generated = int(p["min_negative_parents"])
 
     return settings

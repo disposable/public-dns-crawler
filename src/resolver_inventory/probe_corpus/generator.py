@@ -5,11 +5,19 @@ from __future__ import annotations
 from collections import defaultdict
 
 from resolver_inventory import __version__
-from resolver_inventory.probe_corpus.models import SeedSnapshot
+from resolver_inventory.probe_corpus.models import (
+    GeneratedProbeCandidate,
+    GeneratedProbeCorpusResult,
+    ProbeGenerationReport,
+    SeedSnapshot,
+)
 from resolver_inventory.probe_corpus.schema import ProbeCorpus, ProbeDefinition
 from resolver_inventory.probe_corpus.validators import (
+    BaselineResolverClient,
+    UdpBaselineResolverClient,
     validate_generated_probe_corpus,
-    validate_negative_parent_zone,
+    validate_generation_thresholds,
+    validate_probe_candidate,
 )
 from resolver_inventory.settings import ProbeCorpusConfig
 from resolver_inventory.util.time import utc_now_iso
@@ -18,11 +26,25 @@ from resolver_inventory.util.time import utc_now_iso
 def generate_probe_corpus(
     config: ProbeCorpusConfig,
     seed_snapshot: SeedSnapshot,
-) -> ProbeCorpus:
+    client: BaselineResolverClient | None = None,
+) -> GeneratedProbeCorpusResult:
+    client = client or UdpBaselineResolverClient()
+    report = ProbeGenerationReport(baseline_resolvers_used=list(config.baseline.resolvers))
+    candidates: list[GeneratedProbeCandidate] = []
+    candidates.extend(_generate_positive_exact_probes(config, seed_snapshot))
+    candidates.extend(_generate_positive_consensus_probes(seed_snapshot))
+    candidates.extend(_generate_negative_generated_probes(config))
+
     probes: list[ProbeDefinition] = []
-    probes.extend(_generate_positive_exact_probes(config, seed_snapshot))
-    probes.extend(_generate_positive_consensus_probes(seed_snapshot))
-    probes.extend(_generate_negative_generated_probes(config))
+    for candidate in candidates:
+        report.record_candidate(candidate)
+        validation = validate_probe_candidate(candidate, config, client)
+        if validation.accepted:
+            _apply_validation_metadata(candidate.probe, validation)
+            probes.append(candidate.probe)
+            report.record_accept(candidate, validation)
+        else:
+            report.record_rejection(candidate, validation)
 
     corpus = ProbeCorpus(
         schema_version=config.schema_version,
@@ -33,20 +55,16 @@ def generate_probe_corpus(
         probe_counts=_count_probes(probes),
         probes=probes,
     )
-    validate_generated_probe_corpus(
-        corpus,
-        min_exact_probes=config.min_exact_probes,
-        min_consensus_probes=config.min_consensus_probes,
-        min_negative_parents=config.min_negative_parents,
-    )
-    return corpus
+    validate_generation_thresholds(report, config)
+    validate_generated_probe_corpus(corpus)
+    return GeneratedProbeCorpusResult(corpus=corpus, report=report)
 
 
 def _generate_positive_exact_probes(
     config: ProbeCorpusConfig,
     seed_snapshot: SeedSnapshot,
-) -> list[ProbeDefinition]:
-    probes: list[ProbeDefinition] = []
+) -> list[GeneratedProbeCandidate]:
+    probes: list[GeneratedProbeCandidate] = []
     per_zone_counts: dict[str, int] = defaultdict(int)
     per_family_counts: dict[str, int] = defaultdict(int)
 
@@ -97,40 +115,50 @@ def _exact_probes_for_host(
     per_zone_counts: dict[str, int],
     per_family_counts: dict[str, int],
     config: ProbeCorpusConfig,
-) -> list[ProbeDefinition]:
+) -> list[GeneratedProbeCandidate]:
     if per_zone_counts[zone] >= config.selection.max_per_tld:
         return []
     if per_family_counts[operator_family] >= config.selection.max_per_operator_family:
         return []
 
-    created: list[ProbeDefinition] = []
+    created: list[GeneratedProbeCandidate] = []
     if ipv4 and per_zone_counts[zone] < config.selection.max_per_tld:
         created.append(
-            ProbeDefinition(
-                id=_probe_id("positive-exact", hostname, "A"),
-                kind="positive_exact",
-                qname=hostname,
-                qtype="A",
-                expected_mode="exact_rrset",
-                expected_answers=list(ipv4),
+            GeneratedProbeCandidate(
+                probe=ProbeDefinition(
+                    id=_probe_id("positive-exact", hostname, "A"),
+                    kind="positive_exact",
+                    qname=hostname,
+                    qtype="A",
+                    expected_mode="exact_rrset",
+                    expected_answers=list(ipv4),
+                    source=source,
+                    notes=notes,
+                    stability_score=1.0,
+                ),
                 source=source,
-                notes=notes,
-                stability_score=1.0,
+                original_seed=hostname,
+                kind="positive_exact",
             )
         )
         per_zone_counts[zone] += 1
     if ipv6 and per_zone_counts[zone] < config.selection.max_per_tld:
         created.append(
-            ProbeDefinition(
-                id=_probe_id("positive-exact", hostname, "AAAA"),
-                kind="positive_exact",
-                qname=hostname,
-                qtype="AAAA",
-                expected_mode="exact_rrset",
-                expected_answers=list(ipv6),
+            GeneratedProbeCandidate(
+                probe=ProbeDefinition(
+                    id=_probe_id("positive-exact", hostname, "AAAA"),
+                    kind="positive_exact",
+                    qname=hostname,
+                    qtype="AAAA",
+                    expected_mode="exact_rrset",
+                    expected_answers=list(ipv6),
+                    source=source,
+                    notes=notes,
+                    stability_score=1.0,
+                ),
                 source=source,
-                notes=notes,
-                stability_score=1.0,
+                original_seed=hostname,
+                kind="positive_exact",
             )
         )
         per_zone_counts[zone] += 1
@@ -139,46 +167,51 @@ def _exact_probes_for_host(
     return created
 
 
-def _generate_positive_consensus_probes(seed_snapshot: SeedSnapshot) -> list[ProbeDefinition]:
-    probes: list[ProbeDefinition] = []
+def _generate_positive_consensus_probes(
+    seed_snapshot: SeedSnapshot,
+) -> list[GeneratedProbeCandidate]:
+    probes: list[GeneratedProbeCandidate] = []
     for delegation in seed_snapshot.delegations:
         probes.append(
-            ProbeDefinition(
-                id=_probe_id("positive-consensus", delegation.zone, "NS"),
-                kind="positive_consensus",
-                qname=delegation.zone,
-                qtype="NS",
-                expected_mode="consensus_match",
-                expected_nameservers=list(delegation.nameservers),
+            GeneratedProbeCandidate(
+                probe=ProbeDefinition(
+                    id=_probe_id("positive-consensus", delegation.zone, "NS"),
+                    kind="positive_consensus",
+                    qname=delegation.zone,
+                    qtype="NS",
+                    expected_mode="consensus_match",
+                    expected_nameservers=list(delegation.nameservers),
+                    source=delegation.source,
+                    notes=delegation.notes,
+                    stability_score=0.9,
+                ),
                 source=delegation.source,
-                notes=delegation.notes,
-                stability_score=0.9,
+                original_seed=delegation.zone,
+                kind="positive_consensus",
             )
         )
     return probes
 
 
-def _generate_negative_generated_probes(config: ProbeCorpusConfig) -> list[ProbeDefinition]:
-    probes: list[ProbeDefinition] = []
+def _generate_negative_generated_probes(config: ProbeCorpusConfig) -> list[GeneratedProbeCandidate]:
+    probes: list[GeneratedProbeCandidate] = []
     for parent_zone in config.negative.parent_zones:
         validate_negative_parent_zone_config(parent_zone)
-        if not validate_negative_parent_zone(
-            parent_zone=parent_zone,
-            resolvers=config.baseline.resolvers,
-            label_length=config.negative.label_length,
-            validation_rounds=config.negative.validation_rounds,
-        ):
-            continue
         probes.append(
-            ProbeDefinition(
-                id=_probe_id("negative-generated", parent_zone, "A"),
-                kind="negative_generated",
-                qtype="A",
-                expected_mode="nxdomain",
-                qname_template="{uuid}." + parent_zone.rstrip(".") + ".",
-                parent_zone=parent_zone,
+            GeneratedProbeCandidate(
+                probe=ProbeDefinition(
+                    id=_probe_id("negative-generated", parent_zone, "A"),
+                    kind="negative_generated",
+                    qtype="A",
+                    expected_mode="nxdomain",
+                    qname_template="{uuid}." + parent_zone.rstrip(".") + ".",
+                    parent_zone=parent_zone,
+                    source="negative-parent-pool",
+                    stability_score=0.8,
+                ),
                 source="negative-parent-pool",
-                stability_score=0.8,
+                original_seed=parent_zone,
+                kind="negative_generated",
             )
         )
     return probes
@@ -199,3 +232,14 @@ def _count_probes(probes: list[ProbeDefinition]) -> dict[str, int]:
     for probe in probes:
         counts[probe.kind] = counts.get(probe.kind, 0) + 1
     return counts
+
+
+def _apply_validation_metadata(
+    probe: ProbeDefinition,
+    validation,
+) -> None:
+    # `expected_nameservers` remains generation metadata for consensus probes.
+    if validation.agreed_answers:
+        probe.expected_answers = list(validation.agreed_answers)
+    if validation.agreed_nameservers:
+        probe.expected_nameservers = list(validation.agreed_nameservers)

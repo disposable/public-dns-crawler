@@ -64,17 +64,24 @@ class TestLoadSettings:
         cfg.write_bytes(
             b'[probe_corpus]\nschema_version = 2\ncorpus_version = "dev"\n'
             b'seed_path = "configs/probe-corpus-seeds.json"\n'
-            b"min_exact_probes = 8\nmin_consensus_probes = 3\nmin_negative_parents = 4\n"
             b'[probe_corpus.baseline]\nresolvers = ["127.0.0.1:5300"]\n'
             b'[probe_corpus.negative]\nparent_zones = ["com."]\n'
             b"label_length = 40\nvalidation_rounds = 2\n"
             b"[probe_corpus.selection]\nmax_per_operator_family = 2\nmax_per_tld = 3\n"
+            b"[probe_corpus.validation.exact]\nrounds = 2\nrequired_quorum = 2\n"
+            b"[probe_corpus.validation.consensus]\nrounds = 2\nrequired_quorum = 2\n"
+            b"[probe_corpus.validation.negative]\nrounds = 3\nlabels_per_parent = 3\n"
+            b"required_quorum = 2\nlabel_length = 40\n"
+            b"[probe_corpus.thresholds]\nmin_positive_exact = 6\n"
+            b"min_positive_consensus = 3\nmin_negative_generated = 3\n"
         )
         s = load_settings(cfg)
         assert s.probe_corpus.schema_version == 2
         assert s.probe_corpus.seed_path == "configs/probe-corpus-seeds.json"
         assert s.probe_corpus.baseline.resolvers == ["127.0.0.1:5300"]
         assert s.probe_corpus.negative.parent_zones == ["com."]
+        assert s.probe_corpus.validation.exact.required_quorum == 2
+        assert s.probe_corpus.thresholds.min_positive_exact == 6
 
     def test_load_sources(self, tmp_path: Path) -> None:
         cfg = tmp_path / "config.toml"

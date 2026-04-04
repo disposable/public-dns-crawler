@@ -2,12 +2,16 @@
 
 from __future__ import annotations
 
+from typing import TYPE_CHECKING
+
 import dns.asyncquery
 import dns.message
 import dns.rdatatype
 
 from resolver_inventory.models import ProbeResult
-from resolver_inventory.validate.corpus import CorpusEntry
+
+if TYPE_CHECKING:
+    from resolver_inventory.validate.corpus import CorpusEntry
 
 
 def ok_probe(probe: str, latency_ms: float, details: dict[str, str] | None = None) -> ProbeResult:

@@ -163,14 +163,21 @@ def cmd_validate_probe_corpus(args: argparse.Namespace) -> int:
 
     from resolver_inventory.probe_corpus.schema import parse_probe_corpus
     from resolver_inventory.probe_corpus.validators import validate_probe_corpus
+    from resolver_inventory.settings import load_settings
 
     try:
+        settings = load_settings(args.config)
         parsed = parse_probe_corpus(
             json.loads(Path(args.input).read_text(encoding="utf-8")),
             required_schema_version=args.schema_version,
             strict=not args.no_strict,
         )
-        counts = validate_probe_corpus(parsed)
+        counts = validate_probe_corpus(
+            parsed,
+            min_positive_exact=settings.probe_corpus.thresholds.min_positive_exact,
+            min_positive_consensus=settings.probe_corpus.thresholds.min_positive_consensus,
+            min_negative_generated=settings.probe_corpus.thresholds.min_negative_generated,
+        )
     except Exception as exc:
         logger.error("Probe corpus validation failed: %s", exc)
         return 1
@@ -192,9 +199,16 @@ def cmd_generate_probe_corpus(args: argparse.Namespace) -> int:
 
     settings = load_settings(args.config)
     seed_snapshot = load_seed_snapshot(args.seed_file or settings.probe_corpus.seed_path)
-    corpus = generate_probe_corpus(settings.probe_corpus, seed_snapshot)
+    result = generate_probe_corpus(settings.probe_corpus, seed_snapshot)
     output_dir = Path(args.output or "outputs/probe-corpus")
-    write_probe_corpus_outputs(corpus, output_dir)
+    write_probe_corpus_outputs(result, output_dir)
+    print(f"candidates_seen={result.report.total_candidates}")
+    print(f"accepted_probes={result.report.accepted_count}")
+    for reason, count in sorted(result.report.rejected_by_reason.items()):
+        print(f"rejected_{reason}={count}")
+    for kind, count in sorted(result.report.accepted_counts.items()):
+        print(f"{kind}={count}")
+    print(f"output_dir={output_dir}")
     logger.info("Wrote probe corpus artifacts to %s", output_dir)
     return 0
 
