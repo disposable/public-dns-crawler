@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import re
 import urllib.request
+from urllib.parse import urlparse
 
 from resolver_inventory.models import Candidate
 from resolver_inventory.sources.base import BaseSource
@@ -14,7 +15,7 @@ logger = get_logger(__name__)
 DEFAULT_URL = "https://raw.githubusercontent.com/wiki/curl/curl/DNS-over-HTTPS.md"
 PROVIDERS_URL = DEFAULT_URL
 
-_URL_RE = re.compile(r'https://[^\s"\'<>]+/dns-query[^\s"\'<>]*')
+_URL_RE = re.compile(r'https://[^\s"\'<>|`]+/dns-query[^\s"\'<>|`]*')
 
 
 class CurlWikiSource(BaseSource):
@@ -35,6 +36,9 @@ class CurlWikiSource(BaseSource):
         results: list[Candidate] = []
         for m in _URL_RE.finditer(html):
             endpoint_url = m.group(0).rstrip(".,;)")
+            if not _is_valid_doh_url(endpoint_url):
+                logger.debug("curl_wiki: ignoring invalid DoH URL %r", endpoint_url)
+                continue
             if endpoint_url in seen:
                 continue
             seen.add(endpoint_url)
@@ -56,10 +60,19 @@ class CurlWikiSource(BaseSource):
 
 
 def _parse_doh_url(url: str) -> tuple[str, int, str]:
-    from urllib.parse import urlparse
-
     parsed = urlparse(url)
     host = parsed.hostname or ""
     port = parsed.port or 443
     path = parsed.path or "/dns-query"
     return host, port, path
+
+
+def _is_valid_doh_url(url: str) -> bool:
+    p = urlparse(url)
+    if p.scheme != "https":
+        return False
+    if not p.hostname:
+        return False
+    if p.fragment:
+        return False
+    return True

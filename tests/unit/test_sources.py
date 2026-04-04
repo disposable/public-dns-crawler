@@ -55,6 +55,43 @@ class TestCurlWikiSource:
             "https://two.example/dns-query",
         ]
 
+    def test_ignores_markdown_table_trailing_tags(self, monkeypatch) -> None:
+        body = """
+| Provider | Endpoint | Status | Network |
+| --- | --- | --- | --- |
+| [Marbled Fennec](https://www.marbledfennec.net/public-dns-server/) |
+| https://dns.marbledfennec.net/dns-query | :heavy_check_mark: | OpenNIC |
+"""
+
+        def fake_urlopen(url: str, timeout: int = 30) -> _FakeResponse:
+            return _FakeResponse(body)
+
+        monkeypatch.setattr(urllib.request, "urlopen", fake_urlopen)
+
+        candidates = CurlWikiSource(SourceEntry(type="curl_wiki")).candidates()
+
+        assert len(candidates) == 1
+        assert candidates[0].endpoint_url == "https://dns.marbledfennec.net/dns-query"
+        assert candidates[0].path == "/dns-query"
+
+    def test_rejects_non_https_and_missing_host_urls(self, monkeypatch) -> None:
+        body = """
+https:///dns-query
+http://example.org/dns-query
+https://valid.example/dns-query
+"""
+
+        def fake_urlopen(url: str, timeout: int = 30) -> _FakeResponse:
+            return _FakeResponse(body)
+
+        monkeypatch.setattr(urllib.request, "urlopen", fake_urlopen)
+
+        candidates = CurlWikiSource(SourceEntry(type="curl_wiki")).candidates()
+
+        assert [candidate.endpoint_url for candidate in candidates] == [
+            "https://valid.example/dns-query"
+        ]
+
 
 class TestAdGuardSource:
     def test_uses_current_markdown_url_and_extracts_doh_rows(
