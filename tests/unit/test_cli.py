@@ -11,13 +11,16 @@ import pytest
 from resolver_inventory.cli import (
     _apply_probe_corpus_override,
     _build_parser,
+    _ValidateProgressReporter,
     cmd_generate_probe_corpus,
     cmd_materialize_results,
     cmd_split_candidates,
     main,
 )
+from resolver_inventory.models import Candidate, ValidationResult
 from resolver_inventory.probe_corpus.models import GeneratedProbeCorpusResult, ProbeGenerationReport
 from resolver_inventory.probe_corpus.schema import ProbeCorpus, ProbeDefinition
+from resolver_inventory.validate import ValidationProgress
 
 
 class TestCliParser:
@@ -46,6 +49,11 @@ class TestCliParser:
         parser = _build_parser()
         args = parser.parse_args(["validate", "--validation-parallelism", "100"])
         assert args.validation_parallelism == 100
+
+    def test_validate_progress_every_default(self) -> None:
+        parser = _build_parser()
+        args = parser.parse_args(["validate"])
+        assert args.progress_every == 100
 
     def test_refresh_accepts_probe_corpus_override(self) -> None:
         parser = _build_parser()
@@ -165,6 +173,78 @@ class TestCliProbeCorpusOverride:
         _apply_probe_corpus_override(args, settings)
         assert settings.validation.corpus.mode == "external"
         assert settings.validation.corpus.path == "tests/fixtures/probe-corpus-valid.json"
+
+
+class TestValidateProgressReporter:
+    def _progress(self, completed: int, total: int, *, accepted: bool) -> ValidationProgress:
+        candidate = Candidate(
+            provider=None,
+            source="test",
+            transport="dns-udp",
+            endpoint_url=None,
+            host=f"192.0.2.{completed}",
+            port=53,
+            path=None,
+        )
+        result = ValidationResult(
+            candidate=candidate,
+            accepted=accepted,
+            score=100 if accepted else 0,
+            status="accepted" if accepted else "rejected",
+            reasons=[] if accepted else ["timeout_rate_high"],
+            probes=[],
+        )
+        return ValidationProgress(
+            completed=completed, total=total, candidate=candidate, result=result
+        )
+
+    def test_progress_interval_and_final_line(self, capsys: pytest.CaptureFixture[str]) -> None:
+        reporter = _ValidateProgressReporter(total=234, input_label="in.json", every=100)
+        reporter.emit_start()
+        for completed in range(1, 235):
+            reporter.callback(self._progress(completed, 234, accepted=True))
+        reporter.emit_done()
+
+        lines = [line for line in capsys.readouterr().out.splitlines() if line.strip()]
+        assert lines[0] == "[validate] start input=in.json total=234"
+        assert any("progress done=100 total=234" in line for line in lines)
+        assert any("progress done=200 total=234" in line for line in lines)
+        assert any("progress done=234 total=234 percent=100" in line for line in lines)
+        assert lines[-1].startswith("[validate] done processed=234 total=234 percent=100 ")
+        assert "valid=234 invalid=0" in lines[-1]
+
+    def test_parallel_callback_accounting(self, capsys: pytest.CaptureFixture[str]) -> None:
+        import concurrent.futures
+        import threading
+
+        total = 200
+        reporter = _ValidateProgressReporter(total=total, input_label="discovered", every=50)
+        reporter.emit_start()
+
+        lock = threading.Lock()
+        state = {"completed": 0}
+
+        def worker() -> None:
+            while True:
+                with lock:
+                    state["completed"] += 1
+                    completed = state["completed"]
+                if completed > total:
+                    return
+                reporter.callback(self._progress(completed, total, accepted=(completed % 2 == 0)))
+
+        with concurrent.futures.ThreadPoolExecutor(max_workers=8) as pool:
+            for _ in range(8):
+                pool.submit(worker)
+        reporter.emit_done()
+
+        lines = [line for line in capsys.readouterr().out.splitlines() if line.strip()]
+        assert any("progress done=50 total=200" in line for line in lines)
+        assert any("progress done=100 total=200" in line for line in lines)
+        assert any("progress done=150 total=200" in line for line in lines)
+        assert any("progress done=200 total=200 percent=100" in line for line in lines)
+        assert lines[-1].startswith("[validate] done processed=200 total=200 percent=100 ")
+        assert "valid=100 invalid=100" in lines[-1]
 
 
 class TestCliExport:

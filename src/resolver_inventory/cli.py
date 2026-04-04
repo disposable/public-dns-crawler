@@ -7,6 +7,7 @@ import glob
 import json
 import os
 import sys
+import threading
 import time
 from pathlib import Path
 from typing import TYPE_CHECKING
@@ -73,6 +74,69 @@ def _make_validation_progress_logger(
         _github_notice(message)
 
     return report
+
+
+def _format_elapsed(seconds: float) -> str:
+    whole = max(0, int(seconds))
+    minutes, sec = divmod(whole, 60)
+    hours, minutes = divmod(minutes, 60)
+    if hours:
+        return f"{hours}h{minutes}m{sec}s"
+    if minutes:
+        return f"{minutes}m{sec}s"
+    return f"{sec}s"
+
+
+class _ValidateProgressReporter:
+    def __init__(self, *, total: int, input_label: str, every: int = 100) -> None:
+        self.total = total
+        self.input_label = input_label
+        self.every = max(1, every)
+        self._start = time.monotonic()
+        self._last_emitted = 0
+        self._valid = 0
+        self._invalid = 0
+        self._lock = threading.Lock()
+
+    def emit_start(self) -> None:
+        print(f"[validate] start input={self.input_label} total={self.total}", flush=True)
+
+    def callback(self, progress: ValidationProgress) -> None:
+        with self._lock:
+            if progress.result.status == "accepted":
+                self._valid += 1
+            else:
+                self._invalid += 1
+
+            should_emit = (
+                progress.completed == self.total
+                or (progress.completed - self._last_emitted) >= self.every
+            )
+            if not should_emit:
+                return
+            self._emit_progress(progress.completed)
+            self._last_emitted = progress.completed
+
+    def emit_done(self) -> None:
+        with self._lock:
+            if self.total == 0 or self._last_emitted != self.total:
+                self._emit_progress(self.total)
+                self._last_emitted = self.total
+            elapsed = _format_elapsed(time.monotonic() - self._start)
+            print(
+                f"[validate] done processed={self.total} total={self.total} "
+                f"percent=100 elapsed={elapsed} valid={self._valid} invalid={self._invalid}",
+                flush=True,
+            )
+
+    def _emit_progress(self, done: int) -> None:
+        percent = 100 if self.total == 0 else int((done * 100) / self.total)
+        elapsed = _format_elapsed(time.monotonic() - self._start)
+        print(
+            f"[validate] progress done={done} total={self.total} "
+            f"percent={percent} elapsed={elapsed}",
+            flush=True,
+        )
 
 
 def _apply_probe_corpus_override(args: argparse.Namespace, settings: Settings) -> None:
@@ -163,11 +227,18 @@ def cmd_validate(args: argparse.Namespace) -> int:
 
     _github_group("Validation")
     logger.info("Validating %d candidates…", len(candidates))
+    progress = _ValidateProgressReporter(
+        total=len(candidates),
+        input_label=args.input or "discovered",
+        every=args.progress_every,
+    )
+    progress.emit_start()
     results = validate_candidates(
         candidates,
         settings,
-        progress_callback=_make_validation_progress_logger("validate"),
+        progress_callback=progress.callback,
     )
+    progress.emit_done()
 
     accepted = sum(1 for r in results if r.status == "accepted")
     candidate_count = sum(1 for r in results if r.status == "candidate")
@@ -604,6 +675,13 @@ def _build_parser() -> argparse.ArgumentParser:
         type=int,
         metavar="INT",
         help="Override validation parallelism for this run",
+    )
+    p_validate.add_argument(
+        "--progress-every",
+        type=int,
+        default=100,
+        metavar="INT",
+        help="Emit a progress line every INT completed items (default: 100)",
     )
     p_validate.add_argument(
         "--split-json-max-bytes",

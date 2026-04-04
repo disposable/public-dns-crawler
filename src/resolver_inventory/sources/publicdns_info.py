@@ -33,8 +33,9 @@ class PublicDnsInfoSource(BaseSource):
             with urllib.request.urlopen(url, timeout=30) as resp:
                 content = resp.read().decode("utf-8", errors="replace")
         except Exception as exc:
-            logger.warning("publicdns_info fetch failed: %s", exc)
-            return []
+            msg = f"publicdns_info fetch failed: {exc}"
+            logger.error(msg)
+            raise RuntimeError(msg) from exc
 
         results: list[Candidate] = []
         reader = csv.DictReader(io.StringIO(content))

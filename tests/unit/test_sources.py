@@ -142,3 +142,15 @@ class TestPublicDnsInfoSource:
             ("192.0.2.11", "dns-udp"),
             ("192.0.2.11", "dns-tcp"),
         ]
+
+    def test_fetch_failure_is_fatal(self, monkeypatch) -> None:
+        def fake_urlopen(url: str, timeout: int = 30) -> _FakeResponse:
+            raise OSError("Network is unreachable")
+
+        monkeypatch.setattr(urllib.request, "urlopen", fake_urlopen)
+
+        source = PublicDnsInfoSource(SourceEntry(type="publicdns_info"))
+        import pytest
+
+        with pytest.raises(RuntimeError, match="publicdns_info fetch failed"):
+            source.candidates()
