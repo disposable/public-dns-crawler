@@ -161,6 +161,4 @@ def _render_qname_template(template: str | None) -> str:
     try:
         return template.format(uuid=uuid4().hex)
     except KeyError as exc:
-        raise CorpusSchemaError(
-            f"unsupported qname_template placeholder '{exc.args[0]}'"
-        ) from exc
+        raise CorpusSchemaError(f"unsupported qname_template placeholder '{exc.args[0]}'") from exc

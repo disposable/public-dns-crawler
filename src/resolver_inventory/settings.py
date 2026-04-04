@@ -112,9 +112,7 @@ def load_settings(path: str | Path | None = None) -> Settings:
             path = c.get("path", vc.corpus.path)
             vc.corpus.path = None if path is None else str(path)
             schema_version = c.get("schema_version", vc.corpus.schema_version)
-            vc.corpus.schema_version = (
-                None if schema_version is None else int(schema_version)
-            )
+            vc.corpus.schema_version = None if schema_version is None else int(schema_version)
             vc.corpus.allow_builtin_fallback = bool(
                 c.get("allow_builtin_fallback", vc.corpus.allow_builtin_fallback)
             )
