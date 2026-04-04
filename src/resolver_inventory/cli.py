@@ -5,13 +5,17 @@ from __future__ import annotations
 import argparse
 import sys
 from pathlib import Path
+from typing import TYPE_CHECKING
 
 from resolver_inventory.util.logging import configure_logging, get_logger
 
 logger = get_logger(__name__)
 
+if TYPE_CHECKING:
+    from resolver_inventory.settings import Settings
 
-def _apply_probe_corpus_override(args: argparse.Namespace, settings: object) -> None:
+
+def _apply_probe_corpus_override(args: argparse.Namespace, settings: Settings) -> None:
     probe_corpus = getattr(args, "probe_corpus", None)
     if not probe_corpus:
         return
