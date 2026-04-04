@@ -1,0 +1,34 @@
+[[sources.dns]]
+type = "publicdns_info"
+
+[[sources.dns]]
+type = "manual"
+path = "configs/manual-dns.txt"
+
+[[sources.doh]]
+type = "curl_wiki"
+
+[[sources.doh]]
+type = "adguard"
+
+[[sources.doh]]
+type = "manual"
+path = "configs/manual-doh.toml"
+
+[validation]
+rounds = 3
+timeout_ms = 2000
+parallelism = 50
+require_tcp_for_dns = false
+require_tls_valid_for_doh = true
+
+[validation.corpus]
+mode = "fallback"
+
+[scoring]
+accept_min_score = 80
+candidate_min_score = 60
+
+[export]
+formats = ["json", "text", "dnsdist"]
+output_dir = "outputs/latest"

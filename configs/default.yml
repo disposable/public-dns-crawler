@@ -1,0 +1,27 @@
+sources:
+  dns:
+    - type: publicdns_info
+    - type: manual
+      path: configs/manual-dns.txt
+  doh:
+    - type: curl_wiki
+    - type: adguard
+    - type: manual
+      path: configs/manual-doh.yml
+
+validation:
+  rounds: 3
+  timeout_ms: 2000
+  parallelism: 50
+  require_tcp_for_dns: false
+  require_tls_valid_for_doh: true
+  corpus:
+    mode: fallback
+
+scoring:
+  accept_min_score: 80
+  candidate_min_score: 60
+
+export:
+  formats: ["json", "text", "dnsdist"]
+  output_dir: outputs/latest

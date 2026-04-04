@@ -1,0 +1,38 @@
+name: Refresh resolver data
+
+on:
+  workflow_dispatch:
+  schedule:
+    - cron: "17 3 * * *"
+
+jobs:
+  refresh:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.14"
+      - uses: astral-sh/setup-uv@v5
+      - run: uv sync --group dev
+      - run: >
+          uv run resolver-inventory refresh
+          --config configs/default.toml
+          --output outputs/latest
+      - uses: actions/upload-artifact@v4
+        with:
+          name: refreshed-resolver-data
+          path: outputs/latest/
+
+  canary:
+    runs-on: ubuntu-latest
+    continue-on-error: true
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.14"
+      - uses: astral-sh/setup-uv@v5
+      - run: uv sync --group dev
+      - name: Run network canary tests (non-blocking)
+        run: uv run pytest -m network tests/ -v --no-cov || true

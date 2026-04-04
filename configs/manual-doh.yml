@@ -1,0 +1,7 @@
+# Manual DoH endpoint seeds.
+# Each entry must have at minimum a `url` field.
+# Example:
+# - url: https://dns.example.com/dns-query
+#   provider: Example
+#   bootstrap_ipv4: ["1.2.3.4"]
+#   tls_server_name: dns.example.com

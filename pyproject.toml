@@ -1,0 +1,94 @@
+[build-system]
+requires = ["hatchling>=1.27"]
+build-backend = "hatchling.build"
+
+[project]
+name = "resolver-inventory"
+version = "0.1.0"
+description = "Aggregate, validate, score, and export public DNS and DoH resolvers."
+readme = "README.md"
+requires-python = ">=3.14"
+license = { text = "MIT" }
+authors = [
+  { name = "disposable" }
+]
+keywords = ["dns", "doh", "resolver", "validation", "dnsdist", "unbound"]
+classifiers = [
+  "Development Status :: 3 - Alpha",
+  "Intended Audience :: Developers",
+  "Intended Audience :: System Administrators",
+  "License :: OSI Approved :: MIT License",
+  "Programming Language :: Python :: 3",
+  "Programming Language :: Python :: 3.14",
+  "Programming Language :: Python :: Implementation :: CPython",
+  "Topic :: Internet :: Name Service (DNS)",
+  "Topic :: Software Development :: Libraries :: Python Modules",
+  "Topic :: System :: Networking",
+]
+dependencies = [
+  "dnspython>=2.7",
+  "httpx[http2]>=0.28",
+]
+
+[project.urls]
+Homepage = "https://github.com/disposable/resolver-inventory"
+Repository = "https://github.com/disposable/resolver-inventory"
+Issues = "https://github.com/disposable/resolver-inventory/issues"
+
+[project.scripts]
+resolver-inventory = "resolver_inventory.cli:main"
+
+[project.optional-dependencies]
+docs = []
+network = []
+
+[dependency-groups]
+dev = [
+  "coverage[toml]>=7.8",
+  "mypy>=1.15",
+  "pytest>=8.3",
+  "pytest-asyncio>=0.26",
+  "pytest-cov>=6.0",
+  "respx>=0.22",
+  "ruff>=0.11",
+  "dnslib>=0.9.26",
+]
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/resolver_inventory"]
+
+[tool.ruff]
+line-length = 100
+target-version = "py314"
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "B", "UP", "ASYNC", "RUF"]
+ignore = []
+
+[tool.ruff.format]
+quote-style = "double"
+
+[tool.mypy]
+python_version = "3.14"
+strict = true
+warn_unused_configs = true
+packages = ["resolver_inventory"]
+mypy_path = ["src"]
+
+[tool.pytest.ini_options]
+addopts = "-ra --strict-config --strict-markers"
+testpaths = ["tests"]
+asyncio_mode = "auto"
+markers = [
+  "integration: starts local DNS/DoH fixtures",
+  "network: touches the public network and is not for required CI",
+]
+
+[tool.coverage.run]
+branch = true
+source = ["resolver_inventory"]
+
+[tool.coverage.report]
+show_missing = true
+skip_covered = true
+fail_under = 90

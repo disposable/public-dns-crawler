@@ -1,0 +1,2 @@
+# Manual DNS resolver seeds (one IP[:port] per line, # for comments)
+# Add your trusted resolvers here.
