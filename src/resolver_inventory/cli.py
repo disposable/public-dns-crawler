@@ -191,7 +191,13 @@ def cmd_validate(args: argparse.Namespace) -> int:
 
     _github_group("Export")
     out_path = args.output or "outputs/validated.json"
-    export_json(results, accepted_only=False, path=out_path)
+    export_json(
+        results,
+        accepted_only=False,
+        rejected_failed_only=True,
+        max_file_bytes=getattr(args, "split_json_max_bytes", None),
+        path=out_path,
+    )
     logger.info("Wrote results to %s", out_path)
     _github_output("output_path", str(Path(out_path).resolve()))
     _github_endgroup()
@@ -255,6 +261,7 @@ def cmd_materialize_results(args: argparse.Namespace) -> int:
     from resolver_inventory.settings import load_settings
 
     settings = load_settings(args.config)
+    split_json_max_bytes = getattr(args, "split_json_max_bytes", None)
     out_dir = Path(args.output or settings.export.output_dir)
     out_dir.mkdir(parents=True, exist_ok=True)
 
@@ -276,16 +283,38 @@ def cmd_materialize_results(args: argparse.Namespace) -> int:
 
     exported_files: list[str] = []
     filtered_path = out_dir / "filtered.json"
-    export_filtered_json(filtered_candidates, path=filtered_path)
+    export_filtered_json(
+        filtered_candidates,
+        path=filtered_path,
+        max_file_bytes=split_json_max_bytes,
+    )
     exported_files.append(str(filtered_path))
 
     formats = settings.export.formats
     if "json" in formats:
-        validated_path = out_dir / "validated.json"
         accepted_path = out_dir / "accepted.json"
-        export_json(results, accepted_only=False, path=validated_path)
-        export_json(results, accepted_only=True, path=accepted_path)
-        exported_files.extend([str(validated_path), str(accepted_path)])
+        candidate_path = out_dir / "candidate.json"
+        rejected_path = out_dir / "rejected.json"
+        export_json(
+            results,
+            statuses={"accepted"},
+            path=accepted_path,
+            max_file_bytes=split_json_max_bytes,
+        )
+        export_json(
+            results,
+            statuses={"candidate"},
+            path=candidate_path,
+            max_file_bytes=split_json_max_bytes,
+        )
+        export_json(
+            results,
+            statuses={"rejected"},
+            rejected_failed_only=True,
+            max_file_bytes=split_json_max_bytes,
+            path=rejected_path,
+        )
+        exported_files.extend([str(accepted_path), str(candidate_path), str(rejected_path)])
     if "text" in formats:
         resolvers_path = out_dir / "resolvers.txt"
         doh_path = out_dir / "resolvers-doh.txt"
@@ -326,6 +355,7 @@ def cmd_refresh(args: argparse.Namespace) -> int:
     from resolver_inventory.validate import validate_candidates
 
     settings = load_settings(args.config)
+    split_json_max_bytes = getattr(args, "split_json_max_bytes", None)
     _apply_probe_corpus_override(args, settings)
     out_dir = Path(args.output or settings.export.output_dir)
     out_dir.mkdir(parents=True, exist_ok=True)
@@ -376,14 +406,36 @@ def cmd_refresh(args: argparse.Namespace) -> int:
     formats = settings.export.formats
     exported_files: list[str] = []
     filtered_path = out_dir / "filtered.json"
-    export_filtered_json(filtered_candidates, path=filtered_path)
+    export_filtered_json(
+        filtered_candidates,
+        path=filtered_path,
+        max_file_bytes=split_json_max_bytes,
+    )
     exported_files.append(str(filtered_path))
     if "json" in formats:
-        p1 = out_dir / "validated.json"
-        p2 = out_dir / "accepted.json"
-        export_json(results, accepted_only=False, path=p1)
-        export_json(results, accepted_only=True, path=p2)
-        exported_files.extend([str(p1), str(p2)])
+        accepted_path = out_dir / "accepted.json"
+        candidate_path = out_dir / "candidate.json"
+        rejected_path = out_dir / "rejected.json"
+        export_json(
+            results,
+            statuses={"accepted"},
+            path=accepted_path,
+            max_file_bytes=split_json_max_bytes,
+        )
+        export_json(
+            results,
+            statuses={"candidate"},
+            path=candidate_path,
+            max_file_bytes=split_json_max_bytes,
+        )
+        export_json(
+            results,
+            statuses={"rejected"},
+            rejected_failed_only=True,
+            max_file_bytes=split_json_max_bytes,
+            path=rejected_path,
+        )
+        exported_files.extend([str(accepted_path), str(candidate_path), str(rejected_path)])
     if "text" in formats:
         p1 = out_dir / "resolvers.txt"
         p2 = out_dir / "resolvers-doh.txt"
@@ -481,7 +533,11 @@ def cmd_export(args: argparse.Namespace) -> int:
     out = args.output
 
     if fmt == "json":
-        text = export_json(results, path=out)
+        text = export_json(
+            results,
+            path=out,
+            max_file_bytes=getattr(args, "split_json_max_bytes", None),
+        )
     elif fmt == "text":
         text = export_text(results, path=out)
     elif fmt == "dnsdist":
@@ -549,6 +605,12 @@ def _build_parser() -> argparse.ArgumentParser:
         metavar="INT",
         help="Override validation parallelism for this run",
     )
+    p_validate.add_argument(
+        "--split-json-max-bytes",
+        type=int,
+        metavar="INT",
+        help="Split large JSON output files into .part-XXXX chunks of at most INT bytes",
+    )
 
     # refresh
     p_refresh = sub.add_parser(
@@ -559,6 +621,12 @@ def _build_parser() -> argparse.ArgumentParser:
         "--probe-corpus",
         metavar="FILE",
         help="Load validation probes from a local JSON corpus file",
+    )
+    p_refresh.add_argument(
+        "--split-json-max-bytes",
+        type=int,
+        metavar="INT",
+        help="Split large JSON output files into .part-XXXX chunks of at most INT bytes",
     )
 
     p_split = sub.add_parser(
@@ -599,6 +667,12 @@ def _build_parser() -> argparse.ArgumentParser:
         help="Filtered candidates JSON file from discovery stage",
     )
     p_materialize.add_argument("--output", "-o", metavar="DIR", help="Output directory")
+    p_materialize.add_argument(
+        "--split-json-max-bytes",
+        type=int,
+        metavar="INT",
+        help="Split large JSON output files into .part-XXXX chunks of at most INT bytes",
+    )
 
     # export
     p_export = sub.add_parser(
@@ -611,6 +685,12 @@ def _build_parser() -> argparse.ArgumentParser:
     )
     p_export.add_argument("--input", "-i", metavar="FILE", help="Validated results JSON")
     p_export.add_argument("--output", "-o", metavar="FILE", help="Write output here")
+    p_export.add_argument(
+        "--split-json-max-bytes",
+        type=int,
+        metavar="INT",
+        help="Split large JSON output files into .part-XXXX chunks of at most INT bytes",
+    )
 
     p_validate_corpus = sub.add_parser(
         "validate-probe-corpus",

@@ -67,6 +67,8 @@ resolver-inventory export unbound  [--input FILE] [--output FILE]
 Global flags: `--config FILE`, `--log-level {DEBUG,INFO,WARNING,ERROR}`.
 
 Validation commands also support `--probe-corpus FILE` and `--validation-parallelism N`. When `--probe-corpus` is provided, the CLI sets `validation.corpus.mode = "external"` and loads probes from that local JSON file.
+JSON exports are written in compact form and sorted deterministically by endpoint identity to keep diffs stable.
+Use `--split-json-max-bytes N` on `refresh`, `materialize-results`, or `export json` to split large JSON outputs into `.part-XXXX` files.
 
 ### Staged pipeline commands
 

@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import dataclasses
 import json
 from pathlib import Path
 from typing import Any
@@ -66,15 +65,31 @@ def filtered_candidate_from_dict(data: dict[str, Any]) -> FilteredCandidate:
 
 
 def validation_result_to_dict(result: ValidationResult) -> dict[str, Any]:
-    return {
+    return validation_result_to_dict_export(result)
+
+
+def validation_result_to_dict_export(
+    result: ValidationResult,
+    *,
+    rejected_failed_only: bool = False,
+) -> dict[str, Any]:
+    payload: dict[str, Any] = {
         "status": result.status,
         "score": result.score,
         "accepted": result.accepted,
         "reasons": result.reasons,
         "candidate": candidate_to_dict(result.candidate),
-        "probes": [dataclasses.asdict(probe) for probe in result.probes],
         "median_latency_ms": result.median_latency_ms(),
     }
+    if rejected_failed_only and result.status == "rejected":
+        failed_probes = [_probe_result_to_dict(probe) for probe in result.probes if not probe.ok]
+        all_failed = bool(result.probes) and len(failed_probes) == len(result.probes)
+        payload["all_probes_failed"] = all_failed
+        if not all_failed:
+            payload["probes"] = failed_probes
+        return payload
+    payload["probes"] = [_probe_result_to_dict(probe) for probe in result.probes]
+    return payload
 
 
 def validation_result_from_dict(data: dict[str, Any]) -> ValidationResult:
@@ -98,11 +113,25 @@ def validation_result_from_dict(data: dict[str, Any]) -> ValidationResult:
     )
 
 
+def _probe_result_to_dict(probe: ProbeResult) -> dict[str, Any]:
+    return {
+        "ok": probe.ok,
+        "probe": probe.probe,
+        "latency_ms": probe.latency_ms,
+        "error": probe.error,
+        "details": probe.details,
+    }
+
+
 def load_json_list(path: str | Path) -> list[dict[str, Any]]:
     return json.loads(Path(path).read_text(encoding="utf-8"))
 
 
-def write_json(path: str | Path, payload: Any, *, indent: int = 2) -> None:
+def write_json(path: str | Path, payload: Any, *, indent: int | None = 2) -> None:
     out = Path(path)
     out.parent.mkdir(parents=True, exist_ok=True)
-    out.write_text(json.dumps(payload, indent=indent, ensure_ascii=False), encoding="utf-8")
+    if indent is None:
+        text = json.dumps(payload, ensure_ascii=False, separators=(",", ":"))
+    else:
+        text = json.dumps(payload, indent=indent, ensure_ascii=False)
+    out.write_text(text, encoding="utf-8")

@@ -87,6 +87,75 @@ class TestJsonExport:
         assert "candidate" in record
         assert "probes" in record
 
+    def test_compact_json_default(self) -> None:
+        text = export_json([_dns_result()])
+        assert "\n" not in text
+
+    def test_status_filter(self) -> None:
+        import json
+
+        candidate = _dns_result(host="192.0.2.3", accepted=True)
+        candidate.status = "candidate"
+        candidate.accepted = False
+        rejected = _dns_result(host="192.0.2.4", accepted=False)
+        text = export_json([_dns_result(), candidate, rejected], statuses={"rejected"})
+        data = json.loads(text)
+        assert len(data) == 1
+        assert data[0]["status"] == "rejected"
+
+    def test_default_sort_order_is_stable(self) -> None:
+        import json
+
+        a = _dns_result(host="192.0.2.10", accepted=True)
+        b = _dns_result(host="192.0.2.2", accepted=True)
+        text = export_json([a, b])
+        data = json.loads(text)
+        assert [record["candidate"]["host"] for record in data] == ["192.0.2.10", "192.0.2.2"]
+
+    def test_rejected_only_keeps_failed_probes(self) -> None:
+        import json
+
+        rejected = _dns_result(host="192.0.2.4", accepted=False)
+        rejected.probes = [
+            ProbeResult(ok=True, probe="p-ok", latency_ms=10.0),
+            ProbeResult(ok=False, probe="p-fail-1", error="timeout"),
+            ProbeResult(ok=False, probe="p-fail-2", error="answer_mismatch"),
+        ]
+        text = export_json([rejected], accepted_only=False, rejected_failed_only=True)
+        data = json.loads(text)
+        assert data[0]["all_probes_failed"] is False
+        assert [probe["probe"] for probe in data[0]["probes"]] == ["p-fail-1", "p-fail-2"]
+
+    def test_rejected_all_probes_failed_uses_flag_without_probe_payload(self) -> None:
+        import json
+
+        rejected = _dns_result(host="192.0.2.5", accepted=False)
+        rejected.probes = [
+            ProbeResult(ok=False, probe="p-fail-1", error="timeout"),
+            ProbeResult(ok=False, probe="p-fail-2", error="answer_mismatch"),
+        ]
+        text = export_json([rejected], accepted_only=False, rejected_failed_only=True)
+        data = json.loads(text)
+        assert data[0]["all_probes_failed"] is True
+        assert "probes" not in data[0]
+
+    def test_split_json_output_into_parts(self, tmp_path: object) -> None:
+        from pathlib import Path
+
+        out = Path(str(tmp_path)) / "rejected.json"
+        rejected = _dns_result(host="192.0.2.99", accepted=False)
+        rejected.probes = [ProbeResult(ok=False, probe="probe", error="timeout")]
+        export_json(
+            [rejected, rejected, rejected, rejected],
+            accepted_only=False,
+            rejected_failed_only=True,
+            path=out,
+            max_file_bytes=150,
+        )
+        assert not out.exists()
+        parts = sorted(out.parent.glob("rejected.part-*.json"))
+        assert len(parts) >= 2
+
     def test_write_to_file(self, tmp_path: object) -> None:
         import json
         from pathlib import Path

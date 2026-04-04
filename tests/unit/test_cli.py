@@ -61,6 +61,11 @@ class TestCliParser:
         assert args.config == "configs/default.toml"
         assert args.probe_corpus == "tests/fixtures/x.json"
 
+    def test_refresh_accepts_split_json_max_bytes(self) -> None:
+        parser = _build_parser()
+        args = parser.parse_args(["refresh", "--split-json-max-bytes", "100000000"])
+        assert args.split_json_max_bytes == 100000000
+
     def test_export_requires_format(self) -> None:
         parser = _build_parser()
         with pytest.raises(SystemExit):
@@ -90,6 +95,21 @@ class TestCliParser:
         assert args.command == "materialize-results"
         assert args.inputs_glob == "validated/*.json"
         assert args.filtered_input == "filtered.json"
+
+    def test_materialize_results_accepts_split_json_max_bytes(self) -> None:
+        parser = _build_parser()
+        args = parser.parse_args(
+            [
+                "materialize-results",
+                "--inputs-glob",
+                "validated/*.json",
+                "--filtered-input",
+                "filtered.json",
+                "--split-json-max-bytes",
+                "100000000",
+            ]
+        )
+        assert args.split_json_max_bytes == 100000000
 
     def test_export_json(self) -> None:
         parser = _build_parser()
@@ -416,9 +436,10 @@ class TestShardCommands:
         )
 
         assert rc == 0
-        assert (tmp_path / "out" / "validated.json").exists()
         assert (tmp_path / "out" / "accepted.json").exists()
+        assert (tmp_path / "out" / "candidate.json").exists()
+        assert (tmp_path / "out" / "rejected.json").exists()
         assert (tmp_path / "out" / "filtered.json").exists()
         assert (tmp_path / "out" / "resolvers.txt").exists()
-        merged = json.loads((tmp_path / "out" / "validated.json").read_text(encoding="utf-8"))
-        assert [item["candidate"]["host"] for item in merged] == ["192.0.2.1", "192.0.2.2"]
+        accepted = json.loads((tmp_path / "out" / "accepted.json").read_text(encoding="utf-8"))
+        assert [item["candidate"]["host"] for item in accepted] == ["192.0.2.1", "192.0.2.2"]
