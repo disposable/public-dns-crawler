@@ -11,8 +11,8 @@ from resolver_inventory.util.logging import get_logger
 
 logger = get_logger(__name__)
 
-DEFAULT_URL = "https://raw.githubusercontent.com/curl/curl/master/docs/KNOWN_BUGS"
-PROVIDERS_URL = "https://curl.se/docs/doh-providers.html"
+DEFAULT_URL = "https://raw.githubusercontent.com/wiki/curl/curl/DNS-over-HTTPS.md"
+PROVIDERS_URL = DEFAULT_URL
 
 _URL_RE = re.compile(r'https://[^\s"\'<>]+/dns-query[^\s"\'<>]*')
 

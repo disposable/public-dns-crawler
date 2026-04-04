@@ -1,8 +1,8 @@
-"""Source adapter for AdGuard's public DNS providers JSON list."""
+"""Source adapter for AdGuard's public DNS providers markdown list."""
 
 from __future__ import annotations
 
-import json
+import re
 import urllib.request
 
 from resolver_inventory.models import Candidate
@@ -12,16 +12,17 @@ from resolver_inventory.util.logging import get_logger
 logger = get_logger(__name__)
 
 DEFAULT_URL = (
-    "https://raw.githubusercontent.com/AdguardTeam/AdGuardSDNSFilter/master/Filters/filter.txt"
-)
-PROVIDERS_URL = (
     "https://raw.githubusercontent.com/AdguardTeam/KnowledgeBaseDNS/"
-    "master/docs/public-dns/text/providers.json"
+    "master/docs/general/dns-providers.md"
 )
+PROVIDERS_URL = DEFAULT_URL
+
+_HEADING_RE = re.compile(r"^###\s+(?P<provider>.+?)\s*$")
+_DOH_ROW_RE = re.compile(r"^\|\s*DNS-over-HTTPS\s*\|\s*`(?P<url>https://[^`]+)`")
 
 
 class AdGuardSource(BaseSource):
-    """Fetch AdGuard's DNS providers JSON and yield DoH candidates."""
+    """Fetch AdGuard's DNS providers markdown and yield DoH candidates."""
 
     SOURCE_NAME = "adguard"
 
@@ -29,38 +30,41 @@ class AdGuardSource(BaseSource):
         url = self.entry.url or self.entry.extra.get("url") or PROVIDERS_URL
         try:
             with urllib.request.urlopen(url, timeout=30) as resp:
-                data = json.loads(resp.read().decode("utf-8", errors="replace"))
+                data = resp.read().decode("utf-8", errors="replace")
         except Exception as exc:
             logger.warning("adguard fetch failed: %s", exc)
             return []
 
+        current_provider: str | None = None
+        seen: set[str] = set()
         results: list[Candidate] = []
-        providers = data if isinstance(data, list) else data.get("providers", [])
-        for provider in providers:
-            name = provider.get("name") or provider.get("title") or None
-            for proto in provider.get("protocols", []):
-                if proto.get("type") != "doh":
-                    continue
-                endpoint_url = proto.get("url", "")
-                if not endpoint_url:
-                    continue
-                host, port, path = _parse_doh_url(endpoint_url)
-                bootstrap_ipv4 = list(proto.get("bootstrap_ipv4", []))
-                bootstrap_ipv6 = list(proto.get("bootstrap_ipv6", []))
-                results.append(
-                    Candidate(
-                        provider=name,
-                        source=self.SOURCE_NAME,
-                        transport="doh",
-                        endpoint_url=endpoint_url,
-                        host=host,
-                        port=port,
-                        path=path,
-                        bootstrap_ipv4=bootstrap_ipv4,
-                        bootstrap_ipv6=bootstrap_ipv6,
-                        tls_server_name=host,
-                    )
+        for line in data.splitlines():
+            heading = _HEADING_RE.match(line.strip())
+            if heading:
+                current_provider = heading.group("provider").strip("* ")
+                continue
+
+            match = _DOH_ROW_RE.match(line.strip())
+            if not match:
+                continue
+
+            endpoint_url = match.group("url").rstrip(".,;)")
+            if endpoint_url in seen:
+                continue
+            seen.add(endpoint_url)
+            host, port, path = _parse_doh_url(endpoint_url)
+            results.append(
+                Candidate(
+                    provider=current_provider,
+                    source=self.SOURCE_NAME,
+                    transport="doh",
+                    endpoint_url=endpoint_url,
+                    host=host,
+                    port=port,
+                    path=path,
+                    tls_server_name=host,
                 )
+            )
         logger.info("adguard: found %d DoH endpoints", len(results))
         return results
 

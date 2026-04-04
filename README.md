@@ -19,16 +19,16 @@ Aggregate, validate, score, and export public DNS and DoH resolvers.
 uv sync --group dev
 
 # Full pipeline (discover → validate → export)
-resolver-inventory refresh --config configs/default.toml --output outputs/latest
+uv run resolver-inventory refresh --config configs/default.toml --output outputs/latest
 
 # Full pipeline with an external local probe corpus
-resolver-inventory refresh \
+uv run resolver-inventory refresh \
   --config configs/default.toml \
   --probe-corpus tests/fixtures/probe-corpus-valid.json \
   --output outputs/latest
 
 # Validate a corpus file before using it
-resolver-inventory validate-probe-corpus --input tests/fixtures/probe-corpus-valid.json
+uv run resolver-inventory validate-probe-corpus --input tests/fixtures/probe-corpus-valid.json
 
 # Inspect exported files
 cat outputs/latest/accepted.json
@@ -43,6 +43,7 @@ resolver-inventory discover   # gather raw candidates
 resolver-inventory validate   # run probes, emit scored records
 resolver-inventory refresh    # full pipeline (discover + validate + export)
 resolver-inventory validate-probe-corpus --input FILE
+resolver-inventory generate-probe-corpus [--config FILE] [--seed-file FILE] [--output DIR]
 resolver-inventory export json     [--input FILE] [--output FILE]
 resolver-inventory export text     [--input FILE] [--output FILE]
 resolver-inventory export dnsdist  [--input FILE] [--output FILE]
@@ -227,11 +228,56 @@ uv run pyright
 uv build
 ```
 
+All local test commands in this repository are expected to run through `uv run ...` after
+`uv sync --group dev`. No manual `PYTHONPATH=src` bootstrap is required.
+
+## Probe Corpus Docker Flow
+
+The probe corpus generator can run in Docker and write its artifacts into
+`outputs/probe-corpus/`.
+
+```bash
+# Build the generator image
+make probe-corpus-build-image
+
+# Generate the corpus into outputs/probe-corpus/
+make probe-corpus-generate
+
+# Validate the generated JSON corpus
+make probe-corpus-validate
+
+# Run the normal resolver refresh with that generated corpus
+make refresh-with-probe-corpus
+```
+
+Equivalent direct Docker invocation:
+
+```bash
+mkdir -p outputs/probe-corpus
+docker build -f docker/probe-corpus.Dockerfile -t resolver-inventory-probe-corpus .
+docker run --rm -v "$PWD/outputs/probe-corpus:/out" resolver-inventory-probe-corpus
+uv run resolver-inventory validate-probe-corpus \
+  --config configs/probe-corpus.toml \
+  --input outputs/probe-corpus/probe-corpus.json \
+  --schema-version 2
+uv run resolver-inventory refresh \
+  --config configs/default.toml \
+  --probe-corpus outputs/probe-corpus/probe-corpus.json \
+  --output outputs/latest
+```
+
 ## CI
 
 - **`ci.yml`** – lint, type-check, unit tests (matrix: Linux/macOS/Windows), integration tests, build
 - **`release.yml`** – builds and publishes to PyPI via trusted publishing on `v*` tags
-- **`refresh.yml`** – nightly pipeline run + optional non-blocking canary network tests
+- **`refresh.yml`** – scheduled/manual multi-job pipeline:
+  1. build the Docker probe-corpus generator
+  2. generate `outputs/probe-corpus/probe-corpus.json`
+  3. validate the generated corpus
+  4. pass `probe-corpus` to the refresh job as a workflow artifact
+  5. run `refresh --probe-corpus ...`
+  6. upload `refreshed-resolver-data`
+  7. run optional non-blocking network canaries
 
 Required PR checks never touch public resolvers.
 

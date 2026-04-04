@@ -1,23 +1,61 @@
 name: Refresh resolver data
 
+permissions:
+  contents: read
+
 on:
   workflow_dispatch:
   schedule:
     - cron: "17 3 * * *"
 
 jobs:
-  refresh:
+  generate-probe-corpus:
     runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Build probe corpus generator image
+        run: docker build -f docker/probe-corpus.Dockerfile -t resolver-inventory-probe-corpus .
+      - name: Generate probe corpus
+        run: |
+          mkdir -p outputs/probe-corpus
+          docker run --rm \
+            -v "${{ github.workspace }}/outputs/probe-corpus:/out" \
+            resolver-inventory-probe-corpus
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.14"
+      - uses: astral-sh/setup-uv@37802adc94f370d6bfd71619e3f0bf239e1f3b78
+      - run: uv sync --group dev
+      - name: Validate generated probe corpus
+        run: >
+          uv run resolver-inventory validate-probe-corpus
+          --config configs/probe-corpus.toml
+          --input outputs/probe-corpus/probe-corpus.json
+          --schema-version 2
+      - uses: actions/upload-artifact@v4
+        with:
+          name: probe-corpus
+          path: outputs/probe-corpus/
+
+  refresh-resolvers:
+    runs-on: ubuntu-latest
+    needs: [generate-probe-corpus]
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
         with:
           python-version: "3.14"
-      - uses: astral-sh/setup-uv@v5
+      - uses: astral-sh/setup-uv@37802adc94f370d6bfd71619e3f0bf239e1f3b78
       - run: uv sync --group dev
-      - run: >
+      - uses: actions/download-artifact@v4
+        with:
+          name: probe-corpus
+          path: outputs/probe-corpus/
+      - name: Refresh using generated probe corpus
+        run: >
           uv run resolver-inventory refresh
           --config configs/default.toml
+          --probe-corpus outputs/probe-corpus/probe-corpus.json
           --output outputs/latest
       - uses: actions/upload-artifact@v4
         with:
@@ -26,13 +64,16 @@ jobs:
 
   canary:
     runs-on: ubuntu-latest
+    needs: [refresh-resolvers]
     continue-on-error: true
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
         with:
           python-version: "3.14"
-      - uses: astral-sh/setup-uv@v5
+      - uses: astral-sh/setup-uv@37802adc94f370d6bfd71619e3f0bf239e1f3b78
       - run: uv sync --group dev
       - name: Run network canary tests (non-blocking)
+        env:
+          RUN_NETWORK_TESTS: "1"
         run: uv run pytest -m network tests/ -v --no-cov || true
