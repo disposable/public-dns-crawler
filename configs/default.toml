@@ -31,5 +31,5 @@ accept_min_score = 80
 candidate_min_score = 60
 
 [export]
-formats = ["json", "text", "dnsdist"]
+formats = ["json", "text", "dnsdist", "unbound"]
 output_dir = "outputs/latest"
