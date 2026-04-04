@@ -10,7 +10,7 @@ import pytest
 from resolver_inventory.cli import cmd_refresh
 from resolver_inventory.models import Candidate, ProbeResult
 from resolver_inventory.settings import Settings
-from resolver_inventory.validate import validate_candidates
+from resolver_inventory.validate import ValidationProgress, validate_candidates
 from tests.fixtures.dns_authority import AuthoritativeDnsFixture
 
 pytestmark = pytest.mark.integration
@@ -99,6 +99,39 @@ class TestValidateCandidatesCorpusLifecycle:
         assert len(results) == 2
         assert load_calls == ["called"]
 
+    def test_progress_callback_receives_every_completed_result(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        settings = _settings_for_mode("external", path="tests/fixtures/probe-corpus-valid.json")
+        candidates = [_candidate("127.0.0.1", 53), _candidate("127.0.0.1", 54)]
+        events: list[ValidationProgress] = []
+
+        async def fake_validate_dns_candidate(
+            candidate: Candidate,
+            corpus: object,
+            *,
+            timeout_s: float = 2.0,
+            rounds: int = 1,
+            baseline_resolvers: list[str] | None = None,
+            baseline_cache: dict[tuple[str, str], list[str]] | None = None,
+        ) -> list[ProbeResult]:
+            return [ProbeResult(ok=True, probe=f"fake:{candidate.host}", latency_ms=1.0)]
+
+        monkeypatch.setattr(
+            "resolver_inventory.validate.validate_dns_candidate",
+            fake_validate_dns_candidate,
+        )
+
+        results = validate_candidates(candidates, settings, progress_callback=events.append)
+
+        assert len(results) == 2
+        assert [event.completed for event in events] == [1, 2]
+        assert all(event.total == 2 for event in events)
+        assert sorted(str(event.candidate) for event in events) == [
+            "dns-udp:127.0.0.1:53",
+            "dns-udp:127.0.0.1:54",
+        ]
+
     def test_strict_external_mode_fails_on_invalid_schema(self) -> None:
         settings = _settings_for_mode(
             "external",
@@ -143,9 +176,11 @@ class TestRefreshCommandWithProbeCorpus:
         def fake_validate_candidates(
             candidates: list[Candidate],
             settings: Settings,
+            progress_callback=None,
         ) -> list[object]:
             captured["mode"] = settings.validation.corpus.mode
             captured["path"] = settings.validation.corpus.path or ""
+            assert callable(progress_callback)
             return []
 
         monkeypatch.setattr("resolver_inventory.settings.load_settings", fake_load_settings)

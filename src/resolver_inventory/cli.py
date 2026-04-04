@@ -5,6 +5,7 @@ from __future__ import annotations
 import argparse
 import os
 import sys
+import time
 from pathlib import Path
 from typing import TYPE_CHECKING
 
@@ -14,6 +15,7 @@ logger = get_logger(__name__)
 
 if TYPE_CHECKING:
     from resolver_inventory.settings import Settings
+    from resolver_inventory.validate import ValidationProgress
 
 
 def _github_output(name: str, value: str) -> None:
@@ -41,6 +43,32 @@ def _github_notice(message: str) -> None:
     """Emit a notice annotation in GitHub Actions."""
     if os.environ.get("GITHUB_ACTIONS") == "true":
         print(f"::notice::{message}", flush=True)
+
+
+def _make_validation_progress_logger(
+    label: str,
+    *,
+    every: int = 250,
+    interval_s: float = 30.0,
+):
+    """Return a callback that emits periodic validation progress."""
+    last_emit = 0.0
+
+    def report(progress: ValidationProgress) -> None:
+        nonlocal last_emit
+        now = time.monotonic()
+        if progress.completed != progress.total:
+            if progress.completed % every != 0 and (now - last_emit) < interval_s:
+                return
+        last_emit = now
+        message = (
+            f"{label} progress: {progress.completed}/{progress.total} "
+            f"({progress.result.status}) {progress.candidate}"
+        )
+        logger.info(message)
+        _github_notice(message)
+
+    return report
 
 
 def _apply_probe_corpus_override(args: argparse.Namespace, settings: Settings) -> None:
@@ -134,7 +162,11 @@ def cmd_validate(args: argparse.Namespace) -> int:
 
     _github_group("Validation")
     logger.info("Validating %d candidates…", len(candidates))
-    results = validate_candidates(candidates, settings)
+    results = validate_candidates(
+        candidates,
+        settings,
+        progress_callback=_make_validation_progress_logger("validate"),
+    )
 
     accepted = sum(1 for r in results if r.status == "accepted")
     candidate_count = sum(1 for r in results if r.status == "candidate")
@@ -191,7 +223,12 @@ def cmd_refresh(args: argparse.Namespace) -> int:
     _github_endgroup()
 
     _github_group("Validation")
-    results = validate_candidates(candidates, settings)
+    logger.info("Validating %d candidates…", len(candidates))
+    results = validate_candidates(
+        candidates,
+        settings,
+        progress_callback=_make_validation_progress_logger("refresh"),
+    )
     accepted = [r for r in results if r.accepted]
     accepted_count = len(accepted)
     total_count = len(results)
