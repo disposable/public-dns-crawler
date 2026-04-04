@@ -7,7 +7,7 @@ name = "resolver-inventory"
 version = "0.1.0"
 description = "Aggregate, validate, score, and export public DNS and DoH resolvers."
 readme = "README.md"
-requires-python = ">=3.14"
+requires-python = ">=3.14,<3.15"
 license = { text = "MIT" }
 authors = [
   { name = "disposable" }

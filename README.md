@@ -133,34 +133,11 @@ uv run pytest -m integration tests/integration
 uv run ruff check .
 uv run ruff format .
 
-# Type-check (requires Python 3.14 stable; mypy's C extensions crash on 3.14a6)
+# Type-check (Python 3.14.x)
 uv run mypy src
 
 # Build the package
 uv build
-```
-
-> **Note:** `mypy` uses C extensions that segfault on CPython 3.14a6. Type-checking
-> is enforced in CI against 3.14 stable. Locally on 3.14a6 it can be skipped.
-
-## Package layout
-
-```
-src/resolver_inventory/
-  __init__.py          # public re-exports
-  cli.py               # CLI entry point
-  models.py            # Candidate, ProbeResult, ValidationResult
-  settings.py          # config loading
-  sources/             # discovery adapters
-  normalize/           # deduplication and cleanup
-  validate/            # probing, corpus, scoring
-  export/              # JSON, text, dnsdist, unbound
-  util/                # logging, HTTP, DNS packets, timing
-tests/
-  unit/                # pure unit tests (no I/O)
-  integration/         # local-fixture tests (marked "integration")
-  fixtures/            # authoritative DNS, spoofing DNS, DoH+TLS servers
-configs/               # default config and seed files
 ```
 
 ## CI
@@ -170,14 +147,6 @@ configs/               # default config and seed files
 - **`refresh.yml`** – nightly pipeline run + optional non-blocking canary network tests
 
 Required PR checks never touch public resolvers.
-
-## Non-goals for v1
-
-- DNSCrypt, DoQ, Oblivious DoH
-- Browser fingerprinting or provider privacy scoring
-- Full ECS classification
-- Internet-scale scanning
-- Auto-promotion of newly discovered endpoints into a production allowlist
 
 ## License
 
