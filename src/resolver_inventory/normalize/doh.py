@@ -25,7 +25,9 @@ def normalize_doh_candidates(
                     FilteredCandidate(
                         candidate=c,
                         reason="invalid_doh_url",
-                        detail=f"endpoint URL {c.endpoint_url or ''!r} is not a valid HTTPS DoH URL",
+                        detail=(
+                            f"endpoint URL {c.endpoint_url or ''!r} is not a valid HTTPS DoH URL"
+                        ),
                         stage="normalize",
                     )
                 )

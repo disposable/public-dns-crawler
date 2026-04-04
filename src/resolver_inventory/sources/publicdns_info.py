@@ -103,7 +103,14 @@ class PublicDnsInfoSource(BaseSource):
         raw = self.entry.extra.get("min_reliability", DEFAULT_MIN_RELIABILITY)
         try:
             return float(raw)
-        except (TypeError, ValueError):
+        except TypeError:
+            logger.warning(
+                "publicdns_info invalid min_reliability %r; using default %.2f",
+                raw,
+                DEFAULT_MIN_RELIABILITY,
+            )
+            return DEFAULT_MIN_RELIABILITY
+        except ValueError:
             logger.warning(
                 "publicdns_info invalid min_reliability %r; using default %.2f",
                 raw,

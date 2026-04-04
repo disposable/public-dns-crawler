@@ -2,8 +2,7 @@
 
 from __future__ import annotations
 
-from resolver_inventory.models import Candidate
-from resolver_inventory.models import FilteredCandidate
+from resolver_inventory.models import Candidate, FilteredCandidate
 from resolver_inventory.normalize.dns import normalize_dns_candidates
 from resolver_inventory.normalize.doh import normalize_doh_candidates
 

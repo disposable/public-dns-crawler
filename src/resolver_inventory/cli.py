@@ -201,8 +201,7 @@ def cmd_validate(args: argparse.Namespace) -> int:
 def cmd_refresh(args: argparse.Namespace) -> int:
     """Full pipeline: discover → validate → export all formats."""
     from resolver_inventory.export.dnsdist import export_dnsdist
-    from resolver_inventory.export.json import export_filtered_json
-    from resolver_inventory.export.json import export_json
+    from resolver_inventory.export.json import export_filtered_json, export_json
     from resolver_inventory.export.text import export_text
     from resolver_inventory.export.unbound import export_unbound
     from resolver_inventory.normalize.dns import normalize_dns_candidates

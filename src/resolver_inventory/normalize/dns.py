@@ -37,7 +37,9 @@ def normalize_dns_candidates(
                     FilteredCandidate(
                         candidate=c,
                         reason="duplicate_dns_candidate",
-                        detail=f"duplicate DNS endpoint {host}:{c.port} for transport {c.transport}",
+                        detail=(
+                            f"duplicate DNS endpoint {host}:{c.port} for transport {c.transport}"
+                        ),
                         stage="normalize",
                     )
                 )

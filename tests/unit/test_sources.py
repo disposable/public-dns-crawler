@@ -104,7 +104,9 @@ class TestPublicDnsInfoSource:
 
         monkeypatch.setattr(urllib.request, "urlopen", fake_urlopen)
 
-        source = PublicDnsInfoSource(SourceEntry(type="publicdns_info", extra={"min_reliability": 0.50}))
+        source = PublicDnsInfoSource(
+            SourceEntry(type="publicdns_info", extra={"min_reliability": 0.50})
+        )
         candidates = source.candidates()
 
         assert seen == [PUBLICDNS_INFO_URL]
