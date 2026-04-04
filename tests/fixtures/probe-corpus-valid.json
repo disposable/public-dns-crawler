@@ -1,0 +1,21 @@
+{
+  "schema_version": 1,
+  "corpus_version": "test-001",
+  "generated_at": "2026-04-04T00:00:00Z",
+  "probes": [
+    {
+      "id": "pos-controlled-a",
+      "kind": "positive_consensus",
+      "qname": "a.ok.test.local.",
+      "qtype": "A",
+      "expected_mode": "baseline_match"
+    },
+    {
+      "id": "neg-controlled-a",
+      "kind": "negative_generated",
+      "qname": "nxtest-sentinel-xyzzy.test.local.",
+      "qtype": "A",
+      "expected_mode": "nxdomain"
+    }
+  ]
+}

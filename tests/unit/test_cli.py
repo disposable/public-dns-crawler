@@ -2,12 +2,13 @@
 
 from __future__ import annotations
 
+import argparse
 import json
 from pathlib import Path
 
 import pytest
 
-from resolver_inventory.cli import _build_parser, main
+from resolver_inventory.cli import _apply_probe_corpus_override, _build_parser, main
 
 
 class TestCliParser:
@@ -26,6 +27,20 @@ class TestCliParser:
         parser = _build_parser()
         args = parser.parse_args(["validate"])
         assert args.command == "validate"
+
+    def test_refresh_accepts_probe_corpus_override(self) -> None:
+        parser = _build_parser()
+        args = parser.parse_args(
+            [
+                "refresh",
+                "--config",
+                "configs/default.toml",
+                "--probe-corpus",
+                "tests/fixtures/x.json",
+            ]
+        )
+        assert args.config == "configs/default.toml"
+        assert args.probe_corpus == "tests/fixtures/x.json"
 
     def test_export_requires_format(self) -> None:
         parser = _build_parser()
@@ -60,6 +75,26 @@ class TestCliParser:
         parser = _build_parser()
         args = parser.parse_args(["--log-level", "DEBUG", "discover"])
         assert args.log_level == "DEBUG"
+
+    def test_validate_probe_corpus_subcommand(self) -> None:
+        parser = _build_parser()
+        args = parser.parse_args(
+            ["validate-probe-corpus", "--input", "tests/fixtures/probe-corpus-valid.json"]
+        )
+        assert args.command == "validate-probe-corpus"
+        assert args.schema_version == 1
+
+
+class TestCliProbeCorpusOverride:
+    def test_apply_probe_corpus_override_forces_external_mode(self) -> None:
+        from resolver_inventory.settings import Settings
+
+        args = argparse.Namespace(probe_corpus="tests/fixtures/probe-corpus-valid.json")
+        settings = Settings()
+        settings.validation.corpus.mode = "controlled"
+        _apply_probe_corpus_override(args, settings)
+        assert settings.validation.corpus.mode == "external"
+        assert settings.validation.corpus.path == "tests/fixtures/probe-corpus-valid.json"
 
 
 class TestCliExport:

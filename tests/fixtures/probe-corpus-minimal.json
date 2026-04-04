@@ -1,0 +1,14 @@
+{
+  "schema_version": 1,
+  "corpus_version": "test-minimal",
+  "generated_at": "2026-04-04T00:00:00Z",
+  "probes": [
+    {
+      "id": "neg-generated-a",
+      "kind": "negative_generated",
+      "qname_template": "{uuid}.test.local.",
+      "qtype": "A",
+      "expected_mode": "nxdomain"
+    }
+  ]
+}

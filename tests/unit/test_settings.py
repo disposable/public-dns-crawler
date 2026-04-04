@@ -45,6 +45,20 @@ class TestLoadSettings:
         assert s.validation.corpus.mode == "controlled"
         assert s.validation.corpus.zone == "dns-test.example.net"
 
+    def test_load_corpus_external(self, tmp_path: Path) -> None:
+        cfg = tmp_path / "config.toml"
+        cfg.write_bytes(
+            b'[validation.corpus]\nmode = "external"\n'
+            b'path = "tests/fixtures/probe-corpus-valid.json"\n'
+            b"schema_version = 1\nallow_builtin_fallback = false\nstrict = true\n"
+        )
+        s = load_settings(cfg)
+        assert s.validation.corpus.mode == "external"
+        assert s.validation.corpus.path == "tests/fixtures/probe-corpus-valid.json"
+        assert s.validation.corpus.schema_version == 1
+        assert s.validation.corpus.allow_builtin_fallback is False
+        assert s.validation.corpus.strict is True
+
     def test_load_sources(self, tmp_path: Path) -> None:
         cfg = tmp_path / "config.toml"
         cfg.write_bytes(

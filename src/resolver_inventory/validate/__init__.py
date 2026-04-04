@@ -20,8 +20,8 @@ from resolver_inventory.validate.scorer import score
 async def _validate_one(
     candidate: Candidate,
     settings: Settings,
+    corpus,
 ) -> ValidationResult:
-    corpus = build_corpus(settings.validation.corpus)
     timeout_s = settings.validation.timeout_ms / 1000.0
     rounds = settings.validation.rounds
 
@@ -37,11 +37,12 @@ async def _validate_all(
     candidates: list[Candidate],
     settings: Settings,
 ) -> list[ValidationResult]:
+    corpus = build_corpus(settings.validation.corpus)
     sem = asyncio.Semaphore(settings.validation.parallelism)
 
     async def bounded(c: Candidate) -> ValidationResult:
         async with sem:
-            return await _validate_one(c, settings)
+            return await _validate_one(c, settings, corpus)
 
     tasks = [bounded(c) for c in candidates]
     return list(await asyncio.gather(*tasks))

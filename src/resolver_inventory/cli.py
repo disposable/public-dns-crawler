@@ -11,6 +11,14 @@ from resolver_inventory.util.logging import configure_logging, get_logger
 logger = get_logger(__name__)
 
 
+def _apply_probe_corpus_override(args: argparse.Namespace, settings: object) -> None:
+    probe_corpus = getattr(args, "probe_corpus", None)
+    if not probe_corpus:
+        return
+    settings.validation.corpus.path = probe_corpus
+    settings.validation.corpus.mode = "external"
+
+
 # ---------------------------------------------------------------------------
 # Sub-command handlers
 # ---------------------------------------------------------------------------
@@ -62,6 +70,7 @@ def cmd_validate(args: argparse.Namespace) -> int:
     from resolver_inventory.validate import validate_candidates
 
     settings = load_settings(args.config)
+    _apply_probe_corpus_override(args, settings)
 
     if args.input:
         raw = json.loads(Path(args.input).read_text())
@@ -117,6 +126,7 @@ def cmd_refresh(args: argparse.Namespace) -> int:
     from resolver_inventory.validate import validate_candidates
 
     settings = load_settings(args.config)
+    _apply_probe_corpus_override(args, settings)
     out_dir = Path(args.output or settings.export.output_dir)
     out_dir.mkdir(parents=True, exist_ok=True)
 
@@ -141,6 +151,34 @@ def cmd_refresh(args: argparse.Namespace) -> int:
         export_unbound(results, path=out_dir / "unbound-forward.conf")
 
     logger.info("Outputs written to %s", out_dir)
+    return 0
+
+
+def cmd_validate_probe_corpus(args: argparse.Namespace) -> int:
+    from resolver_inventory.validate.corpus import load_external_corpus
+    from resolver_inventory.validate.corpus_schema import parse_probe_corpus
+
+    try:
+        raw = Path(args.input).read_text(encoding="utf-8")
+        parsed = parse_probe_corpus(
+            __import__("json").loads(raw),
+            required_schema_version=args.schema_version,
+            strict=not args.no_strict,
+        )
+        corpus = load_external_corpus(
+            args.input,
+            required_schema_version=args.schema_version,
+            strict=not args.no_strict,
+        )
+    except Exception as exc:
+        logger.error("Probe corpus validation failed: %s", exc)
+        return 1
+
+    print(
+        f"schema_version={parsed.schema_version} corpus_version={parsed.corpus_version} "
+        f"probes={len(parsed.probes)} positive={len(corpus.positive)} "
+        f"nxdomain={len(corpus.nxdomain)}"
+    )
     return 0
 
 
@@ -226,11 +264,13 @@ def cmd_export(args: argparse.Namespace) -> int:
 
 
 def _build_parser() -> argparse.ArgumentParser:
+    common = argparse.ArgumentParser(add_help=False)
+    common.add_argument("--config", "-c", metavar="FILE", help="Path to TOML config file")
+
     parser = argparse.ArgumentParser(
         prog="resolver-inventory",
         description="Aggregate, validate, score, and export public DNS and DoH resolvers.",
     )
-    parser.add_argument("--config", "-c", metavar="FILE", help="Path to YAML config file")
     parser.add_argument(
         "--log-level",
         default="INFO",
@@ -241,20 +281,38 @@ def _build_parser() -> argparse.ArgumentParser:
     sub = parser.add_subparsers(dest="command", required=True)
 
     # discover
-    p_discover = sub.add_parser("discover", help="Gather raw candidates from all sources")
+    p_discover = sub.add_parser(
+        "discover", parents=[common], help="Gather raw candidates from all sources"
+    )
     p_discover.add_argument("--output", "-o", metavar="FILE", help="Write candidates JSON here")
 
     # validate
-    p_validate = sub.add_parser("validate", help="Run probes and emit scored records")
+    p_validate = sub.add_parser(
+        "validate", parents=[common], help="Run probes and emit scored records"
+    )
     p_validate.add_argument("--input", "-i", metavar="FILE", help="Pre-discovered candidates JSON")
     p_validate.add_argument("--output", "-o", metavar="FILE", help="Write validation results JSON")
+    p_validate.add_argument(
+        "--probe-corpus",
+        metavar="FILE",
+        help="Load validation probes from a local JSON corpus file",
+    )
 
     # refresh
-    p_refresh = sub.add_parser("refresh", help="Full pipeline: discover → validate → export")
+    p_refresh = sub.add_parser(
+        "refresh", parents=[common], help="Full pipeline: discover → validate → export"
+    )
     p_refresh.add_argument("--output", "-o", metavar="DIR", help="Output directory")
+    p_refresh.add_argument(
+        "--probe-corpus",
+        metavar="FILE",
+        help="Load validation probes from a local JSON corpus file",
+    )
 
     # export
-    p_export = sub.add_parser("export", help="Render outputs from validated records")
+    p_export = sub.add_parser(
+        "export", parents=[common], help="Render outputs from validated records"
+    )
     p_export.add_argument(
         "format",
         choices=["json", "text", "dnsdist", "unbound"],
@@ -262,6 +320,29 @@ def _build_parser() -> argparse.ArgumentParser:
     )
     p_export.add_argument("--input", "-i", metavar="FILE", help="Validated results JSON")
     p_export.add_argument("--output", "-o", metavar="FILE", help="Write output here")
+
+    p_validate_corpus = sub.add_parser(
+        "validate-probe-corpus",
+        parents=[common],
+        help="Validate a local probe corpus JSON file",
+    )
+    p_validate_corpus.add_argument(
+        "--input",
+        required=True,
+        metavar="FILE",
+        help="Corpus JSON file",
+    )
+    p_validate_corpus.add_argument(
+        "--schema-version",
+        type=int,
+        default=1,
+        help="Required schema version (default: 1)",
+    )
+    p_validate_corpus.add_argument(
+        "--no-strict",
+        action="store_true",
+        help="Allow unsupported extra fields during schema validation",
+    )
 
     return parser
 
@@ -276,6 +357,7 @@ def main(argv: list[str] | None = None) -> None:
         "validate": cmd_validate,
         "refresh": cmd_refresh,
         "export": cmd_export,
+        "validate-probe-corpus": cmd_validate_probe_corpus,
     }
     handler = handlers.get(args.command)
     if handler is None:

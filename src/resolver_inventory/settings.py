@@ -12,7 +12,11 @@ from typing import Any
 @dataclass
 class CorpusConfig:
     mode: str = "fallback"
-    zone: str = ""
+    zone: str | None = None
+    path: str | None = None
+    schema_version: int | None = None
+    allow_builtin_fallback: bool = False
+    strict: bool = True
 
 
 @dataclass
@@ -103,7 +107,18 @@ def load_settings(path: str | Path | None = None) -> Settings:
         if "corpus" in v:
             c = v["corpus"]
             vc.corpus.mode = str(c.get("mode", vc.corpus.mode))
-            vc.corpus.zone = str(c.get("zone", vc.corpus.zone))
+            zone = c.get("zone", vc.corpus.zone)
+            vc.corpus.zone = None if zone is None else str(zone)
+            path = c.get("path", vc.corpus.path)
+            vc.corpus.path = None if path is None else str(path)
+            schema_version = c.get("schema_version", vc.corpus.schema_version)
+            vc.corpus.schema_version = (
+                None if schema_version is None else int(schema_version)
+            )
+            vc.corpus.allow_builtin_fallback = bool(
+                c.get("allow_builtin_fallback", vc.corpus.allow_builtin_fallback)
+            )
+            vc.corpus.strict = bool(c.get("strict", vc.corpus.strict))
 
     if "scoring" in raw:
         s = raw["scoring"]

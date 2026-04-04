@@ -1,0 +1,13 @@
+{
+  "corpus_version": "test-invalid",
+  "generated_at": "2026-04-04T00:00:00Z",
+  "probes": [
+    {
+      "id": "broken-probe",
+      "kind": "positive_consensus",
+      "qname": "example.com.",
+      "qtype": "A",
+      "expected_mode": "baseline_match"
+    }
+  ]
+}
