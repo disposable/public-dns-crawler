@@ -4,7 +4,7 @@ Aggregate, validate, score, and export public DNS and DoH resolvers.
 
 ## Features
 
-- **Multi-source discovery** – plain DNS from public-dns.info, DoH from curl wiki and AdGuard providers, manual seed files
+- **Multi-source discovery** – plain DNS from public-dns.info, DoH from curl wiki and AdGuard provider lists, manual seed files
 - **Full endpoint metadata** – DoH records preserve URL, host, port, path, TLS server name, bootstrap IPs, and provenance
 - **Active validation** – reachability, NXDOMAIN fidelity, latency, consistency, TLS validity
 - **Pluggable test corpus** – controlled zone, local external JSON corpus, or tiny built-in fallback
@@ -84,7 +84,7 @@ path = "configs/manual-dns.txt"
 type = "curl_wiki"             # scrape curl's DoH providers page
 
 [[sources.doh]]
-type = "adguard"               # fetch AdGuard providers JSON
+type = "adguard"               # fetch AdGuard providers markdown list
 
 [[sources.doh]]
 type = "manual"
@@ -185,10 +185,33 @@ flowchart TD
     P --> Q{candidate transport}
     Q -->|dns-udp or dns-tcp| R[validate_dns_candidate]
     Q -->|doh| S[validate_doh_candidate]
-    R --> T[score results]
-    S --> T
+
+    R --> R1[run positive probes]
+    R1 --> R2{expected_mode}
+    R2 -->|exact_rrset| R3[query candidate over plain DNS<br/>normalize RRset<br/>compare with expected_answers]
+    R2 -->|consensus_match| R4[query candidate over plain DNS<br/>query trusted baselines<br/>compare unordered normalized answers]
+    R2 -->|nxdomain| R5[expand qname_template at runtime<br/>query candidate over plain DNS<br/>require negative response without spoofing]
+    R3 --> T[score results]
+    R4 --> T
+    R5 --> T
+
+    S --> S1[run positive probes]
+    S1 --> S2{expected_mode}
+    S2 -->|exact_rrset| S3[query candidate over DoH<br/>validate TLS / HTTP path<br/>normalize RRset<br/>compare with expected_answers]
+    S2 -->|consensus_match| S4[query candidate over DoH<br/>query trusted baselines<br/>compare unordered normalized answers]
+    S2 -->|nxdomain| S5[expand qname_template at runtime<br/>query candidate over DoH<br/>require negative response without synthetic answers]
+    S3 --> T
+    S4 --> T
+    S5 --> T
+
     T --> U[export outputs]
 ```
+
+`validate_dns_candidate` and `validate_doh_candidate` both consume the same prebuilt corpus,
+but they execute transport-specific query code. `exact_rrset` probes compare directly against
+pinned answers, `consensus_match` probes compare the candidate against the configured trusted
+baseline resolvers, and `negative_generated` probes keep the template in the corpus and expand a
+fresh query name at execution time.
 
 ### Validation reason codes
 
