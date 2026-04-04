@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from resolver_inventory.models import Candidate
+from resolver_inventory.models import FilteredCandidate
 from resolver_inventory.normalize.dns import normalize_dns_candidates
 from resolver_inventory.normalize.doh import normalize_doh_candidates
 
@@ -50,10 +51,25 @@ class TestNormalizeDns:
         result = normalize_dns_candidates([_dns("not-an-ip")])
         assert result == []
 
+    def test_invalid_host_recorded_in_filtered_list(self) -> None:
+        filtered: list[FilteredCandidate] = []
+        result = normalize_dns_candidates([_dns("not-an-ip")], filtered=filtered)
+        assert result == []
+        assert len(filtered) == 1
+        assert filtered[0].reason == "invalid_dns_host"
+
     def test_deduplication(self) -> None:
         candidates = [_dns("1.1.1.1"), _dns("1.1.1.1")]
         result = normalize_dns_candidates(candidates)
         assert len(result) == 1
+
+    def test_duplicate_recorded_in_filtered_list(self) -> None:
+        filtered: list[FilteredCandidate] = []
+        candidates = [_dns("1.1.1.1"), _dns("1.1.1.1")]
+        result = normalize_dns_candidates(candidates, filtered=filtered)
+        assert len(result) == 1
+        assert len(filtered) == 1
+        assert filtered[0].reason == "duplicate_dns_candidate"
 
     def test_udp_and_tcp_kept_separately(self) -> None:
         candidates = [_dns("1.1.1.1", "dns-udp"), _dns("1.1.1.1", "dns-tcp")]
@@ -90,6 +106,22 @@ class TestNormalizeDoh:
         result = normalize_doh_candidates([c])
         assert result == []
 
+    def test_invalid_doh_recorded_in_filtered_list(self) -> None:
+        filtered: list[FilteredCandidate] = []
+        c = Candidate(
+            provider=None,
+            source="test",
+            transport="doh",
+            endpoint_url="http://dns.example.com/dns-query",
+            host="dns.example.com",
+            port=80,
+            path="/dns-query",
+        )
+        result = normalize_doh_candidates([c], filtered=filtered)
+        assert result == []
+        assert len(filtered) == 1
+        assert filtered[0].reason == "invalid_doh_url"
+
     def test_deduplication(self) -> None:
         candidates = [
             _doh("https://dns.example.com/dns-query"),
@@ -97,6 +129,17 @@ class TestNormalizeDoh:
         ]
         result = normalize_doh_candidates(candidates)
         assert len(result) == 1
+
+    def test_duplicate_doh_recorded_in_filtered_list(self) -> None:
+        filtered: list[FilteredCandidate] = []
+        candidates = [
+            _doh("https://dns.example.com/dns-query"),
+            _doh("https://dns.example.com/dns-query"),
+        ]
+        result = normalize_doh_candidates(candidates, filtered=filtered)
+        assert len(result) == 1
+        assert len(filtered) == 1
+        assert filtered[0].reason == "duplicate_doh_candidate"
 
     def test_dns_candidates_skipped(self) -> None:
         result = normalize_doh_candidates([_dns("1.1.1.1")])

@@ -3,10 +3,10 @@
 from __future__ import annotations
 
 from resolver_inventory.export.dnsdist import export_dnsdist
-from resolver_inventory.export.json import export_json
+from resolver_inventory.export.json import export_filtered_json, export_json
 from resolver_inventory.export.text import export_text
 from resolver_inventory.export.unbound import export_unbound
-from resolver_inventory.models import Candidate, ProbeResult, ValidationResult
+from resolver_inventory.models import Candidate, FilteredCandidate, ProbeResult, ValidationResult
 
 
 def _dns_result(
@@ -96,6 +96,30 @@ class TestJsonExport:
         assert out.exists()
         data = json.loads(out.read_text())
         assert len(data) == 1
+
+    def test_filtered_export_contains_reason_and_detail(self) -> None:
+        import json
+
+        record = FilteredCandidate(
+            candidate=Candidate(
+                provider="TestProvider",
+                source="publicdns_info",
+                transport="dns-udp",
+                endpoint_url=None,
+                host="192.0.2.1",
+                port=53,
+                path=None,
+                metadata={"reliability": "0.20"},
+            ),
+            reason="source_reliability_below_min",
+            detail="public-dns.info reliability 0.20 is below configured minimum 0.50",
+            stage="source",
+        )
+        text = export_filtered_json([record])
+        data = json.loads(text)
+        assert data[0]["reason"] == "source_reliability_below_min"
+        assert "configured minimum 0.50" in data[0]["detail"]
+        assert data[0]["candidate"]["host"] == "192.0.2.1"
 
 
 class TestTextExport:

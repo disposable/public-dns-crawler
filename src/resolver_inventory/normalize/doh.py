@@ -4,10 +4,14 @@ from __future__ import annotations
 
 from urllib.parse import urlparse, urlunparse
 
-from resolver_inventory.models import Candidate
+from resolver_inventory.models import Candidate, FilteredCandidate
 
 
-def normalize_doh_candidates(candidates: list[Candidate]) -> list[Candidate]:
+def normalize_doh_candidates(
+    candidates: list[Candidate],
+    *,
+    filtered: list[FilteredCandidate] | None = None,
+) -> list[Candidate]:
     """Deduplicate and validate DoH candidates."""
     seen: set[str] = set()
     result: list[Candidate] = []
@@ -16,8 +20,26 @@ def normalize_doh_candidates(candidates: list[Candidate]) -> list[Candidate]:
             continue
         url = _normalize_url(c.endpoint_url or "")
         if not url:
+            if filtered is not None:
+                filtered.append(
+                    FilteredCandidate(
+                        candidate=c,
+                        reason="invalid_doh_url",
+                        detail=f"endpoint URL {c.endpoint_url or ''!r} is not a valid HTTPS DoH URL",
+                        stage="normalize",
+                    )
+                )
             continue
         if url in seen:
+            if filtered is not None:
+                filtered.append(
+                    FilteredCandidate(
+                        candidate=c,
+                        reason="duplicate_doh_candidate",
+                        detail=f"duplicate DoH endpoint {url}",
+                        stage="normalize",
+                    )
+                )
             continue
         seen.add(url)
         parsed = urlparse(url)

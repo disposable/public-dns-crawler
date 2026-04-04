@@ -201,25 +201,35 @@ def cmd_validate(args: argparse.Namespace) -> int:
 def cmd_refresh(args: argparse.Namespace) -> int:
     """Full pipeline: discover → validate → export all formats."""
     from resolver_inventory.export.dnsdist import export_dnsdist
+    from resolver_inventory.export.json import export_filtered_json
     from resolver_inventory.export.json import export_json
     from resolver_inventory.export.text import export_text
     from resolver_inventory.export.unbound import export_unbound
     from resolver_inventory.normalize.dns import normalize_dns_candidates
     from resolver_inventory.normalize.doh import normalize_doh_candidates
     from resolver_inventory.settings import load_settings
-    from resolver_inventory.sources import discover_candidates
+    from resolver_inventory.sources import discover_candidates_with_filtered
     from resolver_inventory.validate import validate_candidates
 
     settings = load_settings(args.config)
     _apply_probe_corpus_override(args, settings)
     out_dir = Path(args.output or settings.export.output_dir)
     out_dir.mkdir(parents=True, exist_ok=True)
+    filtered_candidates = []
 
     _github_group("Discovery")
-    raw = discover_candidates(settings)
-    candidates = normalize_dns_candidates(raw) + normalize_doh_candidates(raw)
+    discovery = discover_candidates_with_filtered(settings)
+    filtered_candidates.extend(discovery.filtered)
+    candidates = normalize_dns_candidates(
+        discovery.candidates,
+        filtered=filtered_candidates,
+    ) + normalize_doh_candidates(
+        discovery.candidates,
+        filtered=filtered_candidates,
+    )
     logger.info("Discovered %d normalized candidates", len(candidates))
     _github_output("candidates_total", str(len(candidates)))
+    _github_output("filtered_total", str(len(filtered_candidates)))
     _github_endgroup()
 
     _github_group("Validation")
@@ -251,6 +261,9 @@ def cmd_refresh(args: argparse.Namespace) -> int:
     _github_group("Export")
     formats = settings.export.formats
     exported_files: list[str] = []
+    filtered_path = out_dir / "filtered.json"
+    export_filtered_json(filtered_candidates, path=filtered_path)
+    exported_files.append(str(filtered_path))
     if "json" in formats:
         p1 = out_dir / "validated.json"
         p2 = out_dir / "accepted.json"
@@ -274,6 +287,7 @@ def cmd_refresh(args: argparse.Namespace) -> int:
 
     _github_output("output_dir", str(out_dir.resolve()))
     _github_output("exported_files", ",".join(exported_files))
+    _github_output("filtered_path", str(filtered_path.resolve()))
     _github_output("accepted_count", str(accepted_count))
     logger.info("Outputs written to %s", out_dir)
     _github_endgroup()

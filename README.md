@@ -12,6 +12,18 @@ Aggregate, validate, score, and export public DNS and DoH resolvers.
 - **Multiple export formats** – JSON, plain text, dnsdist config, Unbound forward-zone
 - **Deterministic CI** – required PR checks use local ephemeral fixtures, never public resolvers
 
+## Source feeds
+
+Default discovery sources configured in `configs/default.toml`:
+
+- `publicdns_info` (plain DNS): <https://public-dns.info/nameservers.csv>
+  - default filter: `min_reliability = 0.50`
+- `curl_wiki` (DoH): <https://raw.githubusercontent.com/wiki/curl/curl/DNS-over-HTTPS.md>
+- `adguard` (DoH): <https://raw.githubusercontent.com/AdguardTeam/KnowledgeBaseDNS/master/docs/general/dns-providers.md>
+- `manual` seeds (local files):
+  - `configs/manual-dns.txt`
+  - `configs/manual-doh.toml`
+
 ## Quick start
 
 ```bash
@@ -75,6 +87,7 @@ Copy `configs/default.toml` and edit. Config format is **TOML** (stdlib `tomllib
 ```toml
 [[sources.dns]]
 type = "publicdns_info"        # fetch from public-dns.info CSV
+min_reliability = 0.50         # drop unstable entries below this reliability score
 
 [[sources.dns]]
 type = "manual"
@@ -111,6 +124,8 @@ candidate_min_score = 60
 formats = ["json", "text", "dnsdist"]
 output_dir = "outputs/latest"
 ```
+
+`publicdns_info` accepts an optional `min_reliability` setting. Entries with a lower score are ignored before validation. The default is `0.50`.
 
 ### Corpus modes
 

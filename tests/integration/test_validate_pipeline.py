@@ -8,7 +8,7 @@ from pathlib import Path
 import pytest
 
 from resolver_inventory.cli import cmd_refresh
-from resolver_inventory.models import Candidate, ProbeResult
+from resolver_inventory.models import Candidate, DiscoveryResult, FilteredCandidate, ProbeResult
 from resolver_inventory.settings import Settings
 from resolver_inventory.validate import ValidationProgress, validate_candidates
 from tests.fixtures.dns_authority import AuthoritativeDnsFixture
@@ -167,10 +167,24 @@ class TestRefreshCommandWithProbeCorpus:
             settings.export.output_dir = str(tmp_path / "outputs")
             return settings
 
-        def fake_discover_candidates(settings: Settings) -> list[Candidate]:
-            return [_candidate("127.0.0.1", 53)]
+        def fake_discover_candidates(settings: Settings) -> DiscoveryResult:
+            return DiscoveryResult(
+                candidates=[_candidate("127.0.0.1", 53)],
+                filtered=[
+                    FilteredCandidate(
+                        candidate=_candidate("127.0.0.2", 53),
+                        reason="source_reliability_below_min",
+                        detail="public-dns.info reliability 0.20 is below configured minimum 0.50",
+                        stage="source",
+                    )
+                ],
+            )
 
-        def fake_normalize(raw: list[Candidate]) -> list[Candidate]:
+        def fake_normalize(
+            raw: list[Candidate],
+            *,
+            filtered=None,
+        ) -> list[Candidate]:
             return raw
 
         def fake_validate_candidates(
@@ -185,7 +199,7 @@ class TestRefreshCommandWithProbeCorpus:
 
         monkeypatch.setattr("resolver_inventory.settings.load_settings", fake_load_settings)
         monkeypatch.setattr(
-            "resolver_inventory.sources.discover_candidates",
+            "resolver_inventory.sources.discover_candidates_with_filtered",
             fake_discover_candidates,
         )
         monkeypatch.setattr(
@@ -194,7 +208,7 @@ class TestRefreshCommandWithProbeCorpus:
         )
         monkeypatch.setattr(
             "resolver_inventory.normalize.doh.normalize_doh_candidates",
-            lambda raw: [],
+            lambda raw, filtered=None: [],
         )
         monkeypatch.setattr(
             "resolver_inventory.validate.validate_candidates",
@@ -203,6 +217,10 @@ class TestRefreshCommandWithProbeCorpus:
         monkeypatch.setattr(
             "resolver_inventory.export.json.export_json",
             lambda *args, **kwargs: "[]",
+        )
+        monkeypatch.setattr(
+            "resolver_inventory.export.json.export_filtered_json",
+            lambda records, **kwargs: "[]",
         )
 
         rc = cmd_refresh(

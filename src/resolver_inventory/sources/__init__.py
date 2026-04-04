@@ -7,7 +7,7 @@ Public API::
 
 from __future__ import annotations
 
-from resolver_inventory.models import Candidate
+from resolver_inventory.models import Candidate, DiscoveryResult
 from resolver_inventory.settings import Settings, SourceEntry
 from resolver_inventory.sources.adguard import AdGuardSource
 from resolver_inventory.sources.curl_wiki import CurlWikiSource
@@ -36,9 +36,25 @@ def _build_source(entry: SourceEntry, family: str) -> list[Candidate]:
 
 def discover_candidates(settings: Settings) -> list[Candidate]:
     """Aggregate candidates from all configured sources."""
+    return discover_candidates_with_filtered(settings).candidates
+
+
+def discover_candidates_with_filtered(settings: Settings) -> DiscoveryResult:
+    """Aggregate candidates and keep a record of pre-validation filtering."""
     results: list[Candidate] = []
+    filtered = []
     for entry in settings.sources.dns:
-        results.extend(_build_source(entry, "dns"))
+        cls = _DNS_SOURCE_MAP.get(entry.type)
+        if cls is None:
+            raise ValueError(f"Unknown dns source type: {entry.type!r}")
+        source = cls(entry)
+        results.extend(source.candidates())
+        filtered.extend(source.filtered_candidates())
     for entry in settings.sources.doh:
-        results.extend(_build_source(entry, "doh"))
-    return results
+        cls = _DOH_SOURCE_MAP.get(entry.type)
+        if cls is None:
+            raise ValueError(f"Unknown doh source type: {entry.type!r}")
+        source = cls(entry)
+        results.extend(source.candidates())
+        filtered.extend(source.filtered_candidates())
+    return DiscoveryResult(candidates=results, filtered=filtered)

@@ -7,6 +7,14 @@ from typing import Literal
 
 Transport = Literal["dns-udp", "dns-tcp", "doh"]
 Status = Literal["accepted", "candidate", "rejected"]
+FilterReason = Literal[
+    "source_reliability_below_min",
+    "invalid_dns_host",
+    "duplicate_dns_candidate",
+    "invalid_doh_url",
+    "duplicate_doh_candidate",
+]
+FilterStage = Literal["source", "normalize"]
 
 
 @dataclass(slots=True)
@@ -29,6 +37,24 @@ class Candidate:
         if self.transport == "doh":
             return f"doh:{self.endpoint_url}"
         return f"{self.transport}:{self.host}:{self.port}"
+
+
+@dataclass(slots=True)
+class FilteredCandidate:
+    """A candidate that was dropped before validation."""
+
+    candidate: Candidate
+    reason: FilterReason
+    detail: str
+    stage: FilterStage
+
+
+@dataclass(slots=True)
+class DiscoveryResult:
+    """Discovery output plus candidates filtered before validation."""
+
+    candidates: list[Candidate]
+    filtered: list[FilteredCandidate] = field(default_factory=list)
 
 
 @dataclass(slots=True)

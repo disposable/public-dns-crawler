@@ -1,5 +1,6 @@
 [[sources.dns]]
 type = "publicdns_info"
+min_reliability = 0.50
 
 [[sources.dns]]
 type = "manual"
