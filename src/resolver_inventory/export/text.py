@@ -17,14 +17,15 @@ def export_text(
     """Export resolver list as newline-separated IPs or URLs.
 
     Classic DNS resolvers emit ``host:port`` lines.
-    DoH resolvers emit their full URL (only if *include_doh* is True).
+    By default this exports plain DNS resolvers only. Set *include_doh* to export
+    DoH resolvers instead.
     Returns the text. If *path* is given, also writes it to disk.
     """
     records = [r for r in results if r.accepted] if accepted_only else results
     lines: list[str] = []
     for r in records:
         c = r.candidate
-        if c.transport in ("dns-udp", "dns-tcp"):
+        if c.transport in ("dns-udp", "dns-tcp") and not include_doh:
             lines.append(f"{c.host}:{c.port}")
         elif c.transport == "doh" and include_doh:
             lines.append(c.endpoint_url or f"https://{c.host}:{c.port}{c.path}")

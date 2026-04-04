@@ -210,6 +210,7 @@ class TestTextExport:
         results = [_dns_result(), _doh_result()]
         text = export_text(results, include_doh=True)
         assert "https://dns.example.com/dns-query" in text
+        assert "192.0.2.1:53" not in text
 
     def test_deduplication(self) -> None:
         results = [_dns_result(), _dns_result()]
@@ -227,6 +228,13 @@ class TestDnsdistExport:
         text = export_dnsdist([_doh_result()])
         assert "dohPath" in text
         assert "subjectName" in text
+        assert "dns.example.com" in text
+
+    def test_candidate_doh_backend_included(self) -> None:
+        result = _doh_result(accepted=False)
+        result.status = "candidate"
+        text = export_dnsdist([result])
+        assert "dohPath" in text
         assert "dns.example.com" in text
 
     def test_header_present(self) -> None:

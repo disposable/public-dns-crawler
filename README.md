@@ -79,6 +79,19 @@ For multi-VM flows (for example GitHub Actions matrix validation), use:
 3. `validate --input chunks/chunk-XX.json --output shard-XX.json`
 4. `materialize-results --inputs-glob "shards/*.json" --filtered-input filtered.json --output outputs/latest`
 
+### Exported file meanings
+
+- `accepted.json` - resolvers with status `accepted`
+- `candidate.json` - resolvers with status `candidate`
+- `rejected.json` - resolvers with status `rejected`; only failed probes are kept, and `all_probes_failed` is set when every probe failed
+- `filtered.json` - candidates dropped before validation, including source filtering, normalization failures, duplicates, and historical quarantine
+- `resolvers.txt` - accepted plain DNS resolvers only, as `host:port`
+- `resolvers-doh.txt` - accepted DoH resolvers only, as full HTTPS endpoints
+- `dnsdist.conf` - dnsdist backends for all non-rejected resolvers
+- `unbound-forward.conf` - accepted plain DNS resolvers rendered as Unbound forward zones
+
+If `--split-json-max-bytes` is used, large JSON outputs are written as `name.part-XXXX.json` chunks instead of a single large file.
+
 ## Library API
 
 ```python

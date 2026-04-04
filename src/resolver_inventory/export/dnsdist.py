@@ -50,7 +50,7 @@ def export_dnsdist(
     Only includes classic DNS and DoH backends separately.
     Returns the config text. If *path* is given, also writes it to disk.
     """
-    records = [r for r in results if r.accepted] if accepted_only else results
+    records = [r for r in results if r.status != "rejected"] if accepted_only else results
 
     dns_lines: list[str] = []
     doh_lines: list[str] = []
