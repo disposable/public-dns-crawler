@@ -1,0 +1,38 @@
+{
+  "schema_version": 2,
+  "corpus_version": "generated-test-001",
+  "generated_at": "2026-04-04T00:00:00Z",
+  "generator_version": "0.1.0",
+  "sources_used": ["unit-test-seeds"],
+  "probe_counts": {
+    "positive_exact": 1,
+    "positive_consensus": 1,
+    "negative_generated": 1
+  },
+  "probes": [
+    {
+      "id": "exact-controlled-a",
+      "kind": "positive_exact",
+      "qname": "a.ok.test.local.",
+      "qtype": "A",
+      "expected_mode": "exact_rrset",
+      "expected_answers": ["192.0.2.1"]
+    },
+    {
+      "id": "consensus-controlled-ns",
+      "kind": "positive_consensus",
+      "qname": "test.local.",
+      "qtype": "NS",
+      "expected_mode": "consensus_match",
+      "expected_nameservers": ["ns.test.local."]
+    },
+    {
+      "id": "negative-runtime",
+      "kind": "negative_generated",
+      "qname_template": "{uuid}.test.local.",
+      "parent_zone": "test.local.",
+      "qtype": "A",
+      "expected_mode": "nxdomain"
+    }
+  ]
+}

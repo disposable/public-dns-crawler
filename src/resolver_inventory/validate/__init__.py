@@ -21,14 +21,29 @@ async def _validate_one(
     candidate: Candidate,
     settings: Settings,
     corpus,
+    baseline_cache: dict[tuple[str, str], list[str]],
 ) -> ValidationResult:
     timeout_s = settings.validation.timeout_ms / 1000.0
     rounds = settings.validation.rounds
 
     if candidate.transport in ("dns-udp", "dns-tcp"):
-        probes = await validate_dns_candidate(candidate, corpus, timeout_s=timeout_s, rounds=rounds)
+        probes = await validate_dns_candidate(
+            candidate,
+            corpus,
+            timeout_s=timeout_s,
+            rounds=rounds,
+            baseline_resolvers=settings.validation.baseline_resolvers,
+            baseline_cache=baseline_cache,
+        )
     else:
-        probes = await validate_doh_candidate(candidate, corpus, timeout_s=timeout_s, rounds=rounds)
+        probes = await validate_doh_candidate(
+            candidate,
+            corpus,
+            timeout_s=timeout_s,
+            rounds=rounds,
+            baseline_resolvers=settings.validation.baseline_resolvers,
+            baseline_cache=baseline_cache,
+        )
 
     return score(candidate, probes, settings)
 
@@ -38,11 +53,12 @@ async def _validate_all(
     settings: Settings,
 ) -> list[ValidationResult]:
     corpus = build_corpus(settings.validation.corpus)
+    baseline_cache: dict[tuple[str, str], list[str]] = {}
     sem = asyncio.Semaphore(settings.validation.parallelism)
 
     async def bounded(c: Candidate) -> ValidationResult:
         async with sem:
-            return await _validate_one(c, settings, corpus)
+            return await _validate_one(c, settings, corpus, baseline_cache)
 
     tasks = [bounded(c) for c in candidates]
     return list(await asyncio.gather(*tasks))

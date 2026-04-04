@@ -50,6 +50,29 @@ class _WrongAnswerResolver(dnslib.server.BaseResolver):  # type: ignore[misc]
         return reply
 
 
+class _WrongNsResolver(dnslib.server.BaseResolver):  # type: ignore[misc]
+    """Returns an incorrect NS delegation for NS queries and NXDOMAIN otherwise."""
+
+    def resolve(
+        self, request: dnslib.DNSRecord, handler: dnslib.server.DNSHandler
+    ) -> dnslib.DNSRecord:
+        reply = request.reply()
+        qname = str(request.q.qname).lower()
+        if qname == "test.local." and request.q.qtype == dnslib.QTYPE.NS:
+            reply.add_answer(
+                dnslib.RR(
+                    rname=request.q.qname,
+                    rtype=dnslib.QTYPE.NS,
+                    rclass=dnslib.CLASS.IN,
+                    ttl=60,
+                    rdata=dnslib.NS("evil.test.local."),
+                )
+            )
+            return reply
+        reply.header.rcode = dnslib.RCODE.NXDOMAIN
+        return reply
+
+
 class SpoofingDnsFixture:
     """DNS server that spoofs all NXDOMAIN as NOERROR."""
 
@@ -78,6 +101,76 @@ class SpoofingDnsFixture:
             self._server = None
 
     def __enter__(self) -> SpoofingDnsFixture:
+        self.start()
+        return self
+
+    def __exit__(self, *_: object) -> None:
+        self.stop()
+
+
+class WrongAnswerDnsFixture:
+    """DNS server that always returns the wrong A record."""
+
+    def __init__(self, host: str = "127.0.0.1", port: int = 0) -> None:
+        self.host = host
+        self._requested_port = port
+        self.port: int = 0
+        self._server: dnslib.server.DNSServer | None = None
+
+    def start(self) -> None:
+        self._server = dnslib.server.DNSServer(
+            _WrongAnswerResolver(),
+            address=self.host,
+            port=self._requested_port,
+            tcp=False,
+        )
+        self._server.start_thread()
+        if self._server.server and hasattr(self._server.server, "server_address"):
+            self.port = self._server.server.server_address[1]
+        else:
+            self.port = self._requested_port
+
+    def stop(self) -> None:
+        if self._server:
+            self._server.stop()
+            self._server = None
+
+    def __enter__(self) -> WrongAnswerDnsFixture:
+        self.start()
+        return self
+
+    def __exit__(self, *_: object) -> None:
+        self.stop()
+
+
+class WrongNsDnsFixture:
+    """DNS server that returns the wrong NS answer for the zone apex."""
+
+    def __init__(self, host: str = "127.0.0.1", port: int = 0) -> None:
+        self.host = host
+        self._requested_port = port
+        self.port: int = 0
+        self._server: dnslib.server.DNSServer | None = None
+
+    def start(self) -> None:
+        self._server = dnslib.server.DNSServer(
+            _WrongNsResolver(),
+            address=self.host,
+            port=self._requested_port,
+            tcp=False,
+        )
+        self._server.start_thread()
+        if self._server.server and hasattr(self._server.server, "server_address"):
+            self.port = self._server.server.server_address[1]
+        else:
+            self.port = self._requested_port
+
+    def stop(self) -> None:
+        if self._server:
+            self._server.stop()
+            self._server = None
+
+    def __enter__(self) -> WrongNsDnsFixture:
         self.start()
         return self
 

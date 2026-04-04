@@ -26,6 +26,7 @@ class ValidationConfig:
     parallelism: int = 50
     require_tcp_for_dns: bool = False
     require_tls_valid_for_doh: bool = True
+    baseline_resolvers: list[str] = field(default_factory=lambda: ["1.1.1.1", "9.9.9.9", "8.8.8.8"])
     corpus: CorpusConfig = field(default_factory=CorpusConfig)
 
 
@@ -39,6 +40,37 @@ class ScoringConfig:
 class ExportConfig:
     formats: list[str] = field(default_factory=lambda: ["json", "text"])
     output_dir: str = "outputs"
+
+
+@dataclass
+class BaselineConfig:
+    resolvers: list[str] = field(default_factory=lambda: ["1.1.1.1", "9.9.9.9", "8.8.8.8"])
+
+
+@dataclass
+class ProbeCorpusNegativeConfig:
+    parent_zones: list[str] = field(default_factory=lambda: ["com.", "net.", "de.", "jp."])
+    label_length: int = 40
+    validation_rounds: int = 3
+
+
+@dataclass
+class ProbeCorpusSelectionConfig:
+    max_per_operator_family: int = 3
+    max_per_tld: int = 3
+
+
+@dataclass
+class ProbeCorpusConfig:
+    schema_version: int = 2
+    corpus_version: str = "dev"
+    seed_path: str | None = None
+    min_exact_probes: int = 8
+    min_consensus_probes: int = 4
+    min_negative_parents: int = 4
+    baseline: BaselineConfig = field(default_factory=BaselineConfig)
+    negative: ProbeCorpusNegativeConfig = field(default_factory=ProbeCorpusNegativeConfig)
+    selection: ProbeCorpusSelectionConfig = field(default_factory=ProbeCorpusSelectionConfig)
 
 
 @dataclass
@@ -61,6 +93,7 @@ class Settings:
     validation: ValidationConfig = field(default_factory=ValidationConfig)
     scoring: ScoringConfig = field(default_factory=ScoringConfig)
     export: ExportConfig = field(default_factory=ExportConfig)
+    probe_corpus: ProbeCorpusConfig = field(default_factory=ProbeCorpusConfig)
 
 
 def _parse_source_list(raw: list[dict[str, Any]]) -> list[SourceEntry]:
@@ -104,6 +137,8 @@ def load_settings(path: str | Path | None = None) -> Settings:
         vc.require_tls_valid_for_doh = bool(
             v.get("require_tls_valid_for_doh", vc.require_tls_valid_for_doh)
         )
+        if "baseline" in v:
+            vc.baseline_resolvers = list(v["baseline"].get("resolvers", vc.baseline_resolvers))
         if "corpus" in v:
             c = v["corpus"]
             vc.corpus.mode = str(c.get("mode", vc.corpus.mode))
@@ -131,5 +166,31 @@ def load_settings(path: str | Path | None = None) -> Settings:
         e = raw["export"]
         settings.export.formats = list(e.get("formats", settings.export.formats))
         settings.export.output_dir = str(e.get("output_dir", settings.export.output_dir))
+
+    if "probe_corpus" in raw:
+        p = raw["probe_corpus"]
+        pc = settings.probe_corpus
+        pc.schema_version = int(p.get("schema_version", pc.schema_version))
+        pc.corpus_version = str(p.get("corpus_version", pc.corpus_version))
+        seed_path = p.get("seed_path", pc.seed_path)
+        pc.seed_path = None if seed_path is None else str(seed_path)
+        pc.min_exact_probes = int(p.get("min_exact_probes", pc.min_exact_probes))
+        pc.min_consensus_probes = int(p.get("min_consensus_probes", pc.min_consensus_probes))
+        pc.min_negative_parents = int(p.get("min_negative_parents", pc.min_negative_parents))
+        if "baseline" in p:
+            pc.baseline.resolvers = list(p["baseline"].get("resolvers", pc.baseline.resolvers))
+        if "negative" in p:
+            neg = p["negative"]
+            pc.negative.parent_zones = list(neg.get("parent_zones", pc.negative.parent_zones))
+            pc.negative.label_length = int(neg.get("label_length", pc.negative.label_length))
+            pc.negative.validation_rounds = int(
+                neg.get("validation_rounds", pc.negative.validation_rounds)
+            )
+        if "selection" in p:
+            sel = p["selection"]
+            pc.selection.max_per_operator_family = int(
+                sel.get("max_per_operator_family", pc.selection.max_per_operator_family)
+            )
+            pc.selection.max_per_tld = int(sel.get("max_per_tld", pc.selection.max_per_tld))
 
     return settings

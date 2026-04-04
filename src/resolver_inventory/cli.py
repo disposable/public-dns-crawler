@@ -155,30 +155,43 @@ def cmd_refresh(args: argparse.Namespace) -> int:
 
 
 def cmd_validate_probe_corpus(args: argparse.Namespace) -> int:
-    from resolver_inventory.validate.corpus import load_external_corpus
-    from resolver_inventory.validate.corpus_schema import parse_probe_corpus
+    import json
+
+    from resolver_inventory.probe_corpus.schema import parse_probe_corpus
+    from resolver_inventory.probe_corpus.validators import validate_probe_corpus
 
     try:
-        raw = Path(args.input).read_text(encoding="utf-8")
         parsed = parse_probe_corpus(
-            __import__("json").loads(raw),
+            json.loads(Path(args.input).read_text(encoding="utf-8")),
             required_schema_version=args.schema_version,
             strict=not args.no_strict,
         )
-        corpus = load_external_corpus(
-            args.input,
-            required_schema_version=args.schema_version,
-            strict=not args.no_strict,
-        )
+        counts = validate_probe_corpus(parsed)
     except Exception as exc:
         logger.error("Probe corpus validation failed: %s", exc)
         return 1
 
     print(
         f"schema_version={parsed.schema_version} corpus_version={parsed.corpus_version} "
-        f"probes={len(parsed.probes)} positive={len(corpus.positive)} "
-        f"nxdomain={len(corpus.nxdomain)}"
+        f"positive_exact={counts.get('positive_exact', 0)} "
+        f"positive_consensus={counts.get('positive_consensus', 0)} "
+        f"negative_generated={counts.get('negative_generated', 0)}"
     )
+    return 0
+
+
+def cmd_generate_probe_corpus(args: argparse.Namespace) -> int:
+    from resolver_inventory.probe_corpus.exporters import write_probe_corpus_outputs
+    from resolver_inventory.probe_corpus.generator import generate_probe_corpus
+    from resolver_inventory.probe_corpus.sources import load_seed_snapshot
+    from resolver_inventory.settings import load_settings
+
+    settings = load_settings(args.config)
+    seed_snapshot = load_seed_snapshot(args.seed_file or settings.probe_corpus.seed_path)
+    corpus = generate_probe_corpus(settings.probe_corpus, seed_snapshot)
+    output_dir = Path(args.output or "outputs/probe-corpus")
+    write_probe_corpus_outputs(corpus, output_dir)
+    logger.info("Wrote probe corpus artifacts to %s", output_dir)
     return 0
 
 
@@ -344,6 +357,23 @@ def _build_parser() -> argparse.ArgumentParser:
         help="Allow unsupported extra fields during schema validation",
     )
 
+    p_generate_corpus = sub.add_parser(
+        "generate-probe-corpus",
+        parents=[common],
+        help="Generate a reusable probe corpus from vendored infrastructure seeds",
+    )
+    p_generate_corpus.add_argument(
+        "--seed-file",
+        metavar="FILE",
+        help="Optional seed snapshot JSON file",
+    )
+    p_generate_corpus.add_argument(
+        "--output",
+        "-o",
+        metavar="DIR",
+        help="Output directory for corpus artifacts",
+    )
+
     return parser
 
 
@@ -357,6 +387,7 @@ def main(argv: list[str] | None = None) -> None:
         "validate": cmd_validate,
         "refresh": cmd_refresh,
         "export": cmd_export,
+        "generate-probe-corpus": cmd_generate_probe_corpus,
         "validate-probe-corpus": cmd_validate_probe_corpus,
     }
     handler = handlers.get(args.command)

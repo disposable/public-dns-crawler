@@ -11,7 +11,14 @@ import httpx
 
 from resolver_inventory.models import Candidate, ProbeResult
 from resolver_inventory.util.logging import get_logger
-from resolver_inventory.validate.base import fail_probe, ok_probe
+from resolver_inventory.validate.base import (
+    fail_probe,
+    normalize_answer_set,
+    normalize_expected_answers,
+    ok_probe,
+    render_probe_qname,
+    resolve_baseline_answers,
+)
 from resolver_inventory.validate.corpus import Corpus, CorpusEntry
 
 logger = get_logger(__name__)
@@ -46,9 +53,13 @@ async def _probe_positive_doh(
     entry: CorpusEntry,
     client: httpx.AsyncClient,
     url: str,
+    timeout_s: float,
+    baseline_resolvers: list[str],
+    baseline_cache: dict[tuple[str, str], list[str]],
 ) -> ProbeResult:
     probe_name = f"doh:positive:{entry.label}"
-    wire = _build_wire(entry.qname, entry.rdtype)
+    qname = render_probe_qname(entry)
+    wire = _build_wire(qname, entry.rdtype)
     try:
         resp_msg, ms = await _doh_post(client, url, wire)
     except httpx.TimeoutException as exc:
@@ -65,6 +76,32 @@ async def _probe_positive_doh(
         return fail_probe(probe_name, "unexpected_nxdomain", {"rcode": rcode})
     if rcode != "NOERROR":
         return fail_probe(probe_name, f"unexpected_rcode:{rcode}", {"rcode": rcode})
+    answers = normalize_answer_set(resp_msg, entry.rdtype)
+    if entry.expected_mode == "exact_rrset":
+        expected = normalize_expected_answers(entry.expected_answers, entry.rdtype)
+        if answers != expected:
+            return fail_probe(
+                probe_name,
+                "answer_mismatch",
+                {"expected": ",".join(expected), "actual": ",".join(answers)},
+            )
+    elif entry.expected_mode == "consensus_match":
+        try:
+            baseline = await resolve_baseline_answers(
+                qname,
+                entry.rdtype,
+                baseline_resolvers,
+                timeout_s,
+                baseline_cache,
+            )
+        except Exception as exc:
+            return fail_probe(probe_name, f"baseline_error:{exc!s:.80}")
+        if answers != baseline:
+            return fail_probe(
+                probe_name,
+                "answer_mismatch",
+                {"expected": ",".join(baseline), "actual": ",".join(answers)},
+            )
     return ok_probe(probe_name, ms, {"rcode": rcode})
 
 
@@ -74,7 +111,8 @@ async def _probe_nxdomain_doh(
     url: str,
 ) -> ProbeResult:
     probe_name = f"doh:nxdomain:{entry.label}"
-    wire = _build_wire(entry.qname, "A")
+    qname = render_probe_qname(entry)
+    wire = _build_wire(qname, "A")
     try:
         resp_msg, ms = await _doh_post(client, url, wire)
     except httpx.TimeoutException as exc:
@@ -88,7 +126,7 @@ async def _probe_nxdomain_doh(
 
     rcode = dns.rcode.to_text(resp_msg.rcode())  # type: ignore[attr-defined]
     if rcode != "NXDOMAIN":
-        return fail_probe(probe_name, "nxdomain_spoofing", {"rcode": rcode})
+        return fail_probe(probe_name, "nxdomain_spoofing", {"rcode": rcode, "qname": qname})
     return ok_probe(probe_name, ms, {"rcode": rcode})
 
 
@@ -128,10 +166,14 @@ async def validate_doh_candidate(
     timeout_s: float = 5.0,
     rounds: int = 3,
     ssl_context: ssl.SSLContext | None = None,
+    baseline_resolvers: list[str] | None = None,
+    baseline_cache: dict[tuple[str, str], list[str]] | None = None,
 ) -> list[ProbeResult]:
     """Run all DoH probes against a DoH candidate."""
     url = candidate.endpoint_url or ""
     probes: list[ProbeResult] = []
+    baseline_resolvers = baseline_resolvers or ["1.1.1.1", "9.9.9.9", "8.8.8.8"]
+    baseline_cache = baseline_cache or {}
 
     verify: bool | ssl.SSLContext = ssl_context if ssl_context is not None else True
 
@@ -146,7 +188,16 @@ async def validate_doh_candidate(
     ) as client:
         for _ in range(rounds):
             for entry in corpus.positive:
-                probes.append(await _probe_positive_doh(entry, client, url))
+                probes.append(
+                    await _probe_positive_doh(
+                        entry,
+                        client,
+                        url,
+                        timeout_s,
+                        baseline_resolvers,
+                        baseline_cache,
+                    )
+                )
             for entry in corpus.nxdomain:
                 probes.append(await _probe_nxdomain_doh(entry, client, url))
 

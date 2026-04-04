@@ -80,6 +80,8 @@ class TestValidateCandidatesCorpusLifecycle:
             *,
             timeout_s: float = 2.0,
             rounds: int = 1,
+            baseline_resolvers: list[str] | None = None,
+            baseline_cache: dict[tuple[str, str], list[str]] | None = None,
         ) -> list[ProbeResult]:
             return [ProbeResult(ok=True, probe=f"fake:{candidate.host}", latency_ms=1.0)]
 

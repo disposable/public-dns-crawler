@@ -21,6 +21,8 @@ import dnslib.server
 
 ZONE_NAME = "test.local."
 ZONE_RECORDS: list[tuple[str, str, Any]] = [
+    ("test.local.", "NS", "ns.test.local."),
+    ("ns.test.local.", "A", "192.0.2.53"),
     ("a.ok.test.local.", "A", "192.0.2.1"),
     ("aaaa.ok.test.local.", "AAAA", "2001:db8::1"),
     ("txt.ok.test.local.", "TXT", b"v=test1"),
@@ -43,6 +45,8 @@ class _AuthResolver(dnslib.server.BaseResolver):  # type: ignore[misc]
                 entry = dnslib.TXT(rdata)
             elif rtype == "CNAME":
                 entry = dnslib.CNAME(rdata)
+            elif rtype == "NS":
+                entry = dnslib.NS(rdata)
             else:
                 continue
             self._records.setdefault(key, []).append(entry)

@@ -5,15 +5,17 @@
   "probes": [
     {
       "id": "pos-controlled-a",
-      "kind": "positive_consensus",
+      "kind": "positive_exact",
       "qname": "a.ok.test.local.",
       "qtype": "A",
-      "expected_mode": "baseline_match"
+      "expected_mode": "exact_rrset",
+      "expected_answers": ["192.0.2.1"]
     },
     {
       "id": "neg-controlled-a",
       "kind": "negative_generated",
-      "qname": "nxtest-sentinel-xyzzy.test.local.",
+      "qname_template": "{uuid}.test.local.",
+      "parent_zone": "test.local.",
       "qtype": "A",
       "expected_mode": "nxdomain"
     }

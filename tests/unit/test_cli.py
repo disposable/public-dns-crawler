@@ -8,7 +8,12 @@ from pathlib import Path
 
 import pytest
 
-from resolver_inventory.cli import _apply_probe_corpus_override, _build_parser, main
+from resolver_inventory.cli import (
+    _apply_probe_corpus_override,
+    _build_parser,
+    cmd_generate_probe_corpus,
+    main,
+)
 
 
 class TestCliParser:
@@ -84,6 +89,12 @@ class TestCliParser:
         assert args.command == "validate-probe-corpus"
         assert args.schema_version == 1
 
+    def test_generate_probe_corpus_subcommand(self) -> None:
+        parser = _build_parser()
+        args = parser.parse_args(["generate-probe-corpus", "--output", "outputs/probe-corpus"])
+        assert args.command == "generate-probe-corpus"
+        assert args.output == "outputs/probe-corpus"
+
 
 class TestCliProbeCorpusOverride:
     def test_apply_probe_corpus_override_forces_external_mode(self) -> None:
@@ -150,3 +161,50 @@ class TestCliExport:
         with pytest.raises(SystemExit) as exc:
             main(["export", "json", "--input", str(tmp_path / "nonexistent.json")])
         assert exc.value.code == 1
+
+
+class TestGenerateProbeCorpusCommand:
+    def test_generate_probe_corpus_writes_outputs(
+        self,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        config = tmp_path / "probe-corpus.toml"
+        config.write_text(
+            "\n".join(
+                [
+                    "[probe_corpus]",
+                    'seed_path = "configs/probe-corpus-seeds.json"',
+                    "min_exact_probes = 4",
+                    "min_consensus_probes = 3",
+                    "min_negative_parents = 1",
+                    "",
+                    "[probe_corpus.baseline]",
+                    'resolvers = ["127.0.0.1:53"]',
+                    "",
+                    "[probe_corpus.negative]",
+                    'parent_zones = ["com."]',
+                    "label_length = 40",
+                    "validation_rounds = 1",
+                ]
+            ),
+            encoding="utf-8",
+        )
+        monkeypatch.setattr(
+            "resolver_inventory.probe_corpus.generator.validate_negative_parent_zone",
+            lambda **kwargs: True,
+        )
+
+        rc = cmd_generate_probe_corpus(
+            argparse.Namespace(
+                config=str(config),
+                seed_file=None,
+                output=str(tmp_path / "out"),
+            )
+        )
+
+        assert rc == 0
+        assert (tmp_path / "out" / "probe-corpus.json").exists()
+        assert (tmp_path / "out" / "probe-corpus.yaml").exists()
+        assert (tmp_path / "out" / "metadata.json").exists()
+        assert (tmp_path / "out" / "SUMMARY.md").exists()

@@ -10,7 +10,14 @@ import dns.rdatatype
 
 from resolver_inventory.models import Candidate, ProbeResult
 from resolver_inventory.util.logging import get_logger
-from resolver_inventory.validate.base import fail_probe, ok_probe
+from resolver_inventory.validate.base import (
+    fail_probe,
+    normalize_answer_set,
+    normalize_expected_answers,
+    ok_probe,
+    render_probe_qname,
+    resolve_baseline_answers,
+)
 from resolver_inventory.validate.corpus import Corpus, CorpusEntry
 
 logger = get_logger(__name__)
@@ -46,9 +53,12 @@ async def _probe_positive(
     port: int,
     transport: str,
     timeout_s: float,
+    baseline_resolvers: list[str],
+    baseline_cache: dict[tuple[str, str], list[str]],
 ) -> ProbeResult:
     probe_name = f"{transport}:positive:{entry.label}"
-    msg = dns.message.make_query(entry.qname, dns.rdatatype.from_text(entry.rdtype))
+    qname = render_probe_qname(entry)
+    msg = dns.message.make_query(qname, dns.rdatatype.from_text(entry.rdtype))
     msg.id = 0
     try:
         if transport == "dns-udp":
@@ -63,6 +73,32 @@ async def _probe_positive(
         return fail_probe(probe_name, f"unexpected_rcode:{rcode}", {"rcode": rcode})
     if rcode == "NXDOMAIN":
         return fail_probe(probe_name, "unexpected_nxdomain", {"rcode": rcode})
+    answers = normalize_answer_set(resp, entry.rdtype)
+    if entry.expected_mode == "exact_rrset":
+        expected = normalize_expected_answers(entry.expected_answers, entry.rdtype)
+        if answers != expected:
+            return fail_probe(
+                probe_name,
+                "answer_mismatch",
+                {"expected": ",".join(expected), "actual": ",".join(answers)},
+            )
+    elif entry.expected_mode == "consensus_match":
+        try:
+            baseline = await resolve_baseline_answers(
+                qname,
+                entry.rdtype,
+                baseline_resolvers,
+                timeout_s,
+                baseline_cache,
+            )
+        except Exception as exc:
+            return fail_probe(probe_name, f"baseline_error:{exc!s:.80}")
+        if answers != baseline:
+            return fail_probe(
+                probe_name,
+                "answer_mismatch",
+                {"expected": ",".join(baseline), "actual": ",".join(answers)},
+            )
     return ok_probe(probe_name, ms, {"rcode": rcode})
 
 
@@ -74,7 +110,8 @@ async def _probe_nxdomain(
     timeout_s: float,
 ) -> ProbeResult:
     probe_name = f"{transport}:nxdomain:{entry.label}"
-    msg = dns.message.make_query(entry.qname, dns.rdatatype.A)
+    qname = render_probe_qname(entry)
+    msg = dns.message.make_query(qname, dns.rdatatype.A)
     msg.id = 0
     try:
         if transport == "dns-udp":
@@ -89,7 +126,7 @@ async def _probe_nxdomain(
         return fail_probe(
             probe_name,
             "nxdomain_spoofing",
-            {"rcode": rcode, "answers": str(len(resp.answer))},
+            {"rcode": rcode, "answers": str(len(resp.answer)), "qname": qname},
         )
     return ok_probe(probe_name, ms, {"rcode": rcode})
 
@@ -100,16 +137,30 @@ async def validate_dns_candidate(
     *,
     timeout_s: float = 2.0,
     rounds: int = 3,
+    baseline_resolvers: list[str] | None = None,
+    baseline_cache: dict[tuple[str, str], list[str]] | None = None,
 ) -> list[ProbeResult]:
     """Run all DNS probes against a plain DNS candidate."""
     transport = candidate.transport
     host = candidate.host
     port = candidate.port
     probes: list[ProbeResult] = []
+    baseline_resolvers = baseline_resolvers or ["1.1.1.1", "9.9.9.9", "8.8.8.8"]
+    baseline_cache = baseline_cache or {}
 
     for _ in range(rounds):
         for entry in corpus.positive:
-            probes.append(await _probe_positive(entry, host, port, transport, timeout_s))
+            probes.append(
+                await _probe_positive(
+                    entry,
+                    host,
+                    port,
+                    transport,
+                    timeout_s,
+                    baseline_resolvers,
+                    baseline_cache,
+                )
+            )
         for entry in corpus.nxdomain:
             probes.append(await _probe_nxdomain(entry, host, port, transport, timeout_s))
 

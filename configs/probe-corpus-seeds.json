@@ -1,0 +1,126 @@
+{
+  "snapshot_version": 1,
+  "generated_at": "2026-04-04T00:00:00Z",
+  "sources_used": [
+    "https://www.iana.org/domains/root/servers",
+    "https://www.iana.org/domains/root/db/de.html",
+    "https://www.iana.org/domains/root/db/uk.html",
+    "https://www.iana.org/domains/root/db/jp.html"
+  ],
+  "root_servers": [
+    {
+      "hostname": "a.root-servers.net.",
+      "ipv4": ["198.41.0.4"],
+      "ipv6": ["2001:503:ba3e::2:30"],
+      "source": "iana-root-servers",
+      "operator_family": "verisign"
+    },
+    {
+      "hostname": "b.root-servers.net.",
+      "ipv4": ["170.247.170.2"],
+      "ipv6": ["2801:1b8:10::b"],
+      "source": "iana-root-servers",
+      "operator_family": "isi"
+    },
+    {
+      "hostname": "c.root-servers.net.",
+      "ipv4": ["192.33.4.12"],
+      "ipv6": ["2001:500:2::c"],
+      "source": "iana-root-servers",
+      "operator_family": "cogent"
+    },
+    {
+      "hostname": "l.root-servers.net.",
+      "ipv4": ["199.7.83.42"],
+      "ipv6": ["2001:500:9f::42"],
+      "source": "iana-root-servers",
+      "operator_family": "icann"
+    }
+  ],
+  "delegations": [
+    {
+      "zone": "de.",
+      "nameservers": ["a.nic.de.", "f.nic.de.", "z.nic.de."],
+      "source": "iana-root-db-de",
+      "exact_hosts": [
+        {
+          "hostname": "a.nic.de.",
+          "ipv4": ["194.0.0.53"],
+          "ipv6": ["2001:678:2::53"],
+          "source": "iana-root-db-de",
+          "operator_family": "denic"
+        },
+        {
+          "hostname": "f.nic.de.",
+          "ipv4": ["81.91.164.5"],
+          "ipv6": ["2a02:568:0:2::53"],
+          "source": "iana-root-db-de",
+          "operator_family": "denic"
+        },
+        {
+          "hostname": "z.nic.de.",
+          "ipv4": ["194.146.106.90"],
+          "ipv6": ["2001:67c:1010:23::53"],
+          "source": "iana-root-db-de",
+          "operator_family": "denic"
+        }
+      ]
+    },
+    {
+      "zone": "uk.",
+      "nameservers": ["dns1.nic.uk.", "dns2.nic.uk.", "nsa.nic.uk.", "nsb.nic.uk."],
+      "source": "iana-root-db-uk",
+      "exact_hosts": [
+        {
+          "hostname": "dns1.nic.uk.",
+          "ipv4": ["213.248.216.1"],
+          "source": "iana-root-db-uk",
+          "operator_family": "nominet"
+        },
+        {
+          "hostname": "dns2.nic.uk.",
+          "ipv4": ["103.49.80.1"],
+          "source": "iana-root-db-uk",
+          "operator_family": "nominet"
+        },
+        {
+          "hostname": "nsa.nic.uk.",
+          "ipv4": ["156.154.100.3"],
+          "source": "iana-root-db-uk",
+          "operator_family": "nominet"
+        },
+        {
+          "hostname": "nsb.nic.uk.",
+          "ipv4": ["156.154.101.3"],
+          "source": "iana-root-db-uk",
+          "operator_family": "nominet"
+        }
+      ]
+    },
+    {
+      "zone": "jp.",
+      "nameservers": ["a.dns.jp.", "b.dns.jp.", "h.dns.jp."],
+      "source": "iana-root-db-jp",
+      "exact_hosts": [
+        {
+          "hostname": "a.dns.jp.",
+          "ipv4": ["203.119.1.1"],
+          "source": "iana-root-db-jp",
+          "operator_family": "jprs"
+        },
+        {
+          "hostname": "b.dns.jp.",
+          "ipv4": ["203.119.1.2"],
+          "source": "iana-root-db-jp",
+          "operator_family": "jprs"
+        },
+        {
+          "hostname": "h.dns.jp.",
+          "ipv4": ["204.61.216.100"],
+          "source": "iana-root-db-jp",
+          "operator_family": "jprs"
+        }
+      ]
+    }
+  ]
+}
