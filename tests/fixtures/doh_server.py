@@ -2,7 +2,7 @@
 
 Uses stdlib http.server + ssl (cert generated via subprocess openssl) to
 serve DNS-over-HTTPS on a random localhost port. No third-party C
-extensions required — openssl is available on all CI runners.
+extensions required - openssl is available on all CI runners.
 The same authoritative zone as dns_authority.py is served.
 """
 

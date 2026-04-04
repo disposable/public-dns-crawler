@@ -13,8 +13,9 @@ FilterReason = Literal[
     "duplicate_dns_candidate",
     "invalid_doh_url",
     "duplicate_doh_candidate",
+    "historical_dns_quarantine",
 ]
-FilterStage = Literal["source", "normalize"]
+FilterStage = Literal["source", "normalize", "history"]
 
 
 @dataclass(slots=True)
@@ -89,3 +90,18 @@ class ValidationResult:
         if len(latencies) % 2 == 0:
             return (latencies[mid - 1] + latencies[mid]) / 2.0
         return latencies[mid]
+
+
+@dataclass(slots=True)
+class DnsHostOutcome:
+    """Aggregated daily validation outcome for a plain DNS host."""
+
+    host: str
+    status: Status
+    reasons: list[str]
+    reasons_signature: str
+    accepted_count: int
+    candidate_count: int
+    rejected_count: int
+    udp_status: Status | None
+    tcp_status: Status | None

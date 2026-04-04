@@ -1,16 +1,15 @@
-# resolver-inventory
+# Public DNS and DoH resolver crawler
 
 Aggregate, validate, score, and export public DNS and DoH resolvers.
 
 ## Features
 
-- **Multi-source discovery** – plain DNS from public-dns.info, DoH from curl wiki and AdGuard provider lists, manual seed files
-- **Full endpoint metadata** – DoH records preserve URL, host, port, path, TLS server name, bootstrap IPs, and provenance
-- **Active validation** – reachability, NXDOMAIN fidelity, latency, consistency, TLS validity
-- **Pluggable test corpus** – controlled zone, local external JSON corpus, or tiny built-in fallback
-- **Scored output** – `accepted` / `candidate` / `rejected` with machine-readable reason codes
-- **Multiple export formats** – JSON, plain text, dnsdist config, Unbound forward-zone
-- **Deterministic CI** – required PR checks use local ephemeral fixtures, never public resolvers
+- **Multi-source discovery** - plain DNS from public-dns.info, DoH from curl wiki and AdGuard provider lists, manual seed files
+- **Full endpoint metadata** - DoH records preserve URL, host, port, path, TLS server name, bootstrap IPs, and provenance
+- **Active validation** - reachability, NXDOMAIN fidelity, latency, consistency, TLS validity
+- **Pluggable test corpus** - controlled zone, local external JSON corpus, or tiny built-in fallback
+- **Scored output** - `accepted` / `candidate` / `rejected` with machine-readable reason codes
+- **Multiple export formats** - JSON, plain text, dnsdist config, Unbound forward-zone
 
 ## Source feeds
 
@@ -259,7 +258,7 @@ uv run pytest -m integration tests/integration
 uv run ruff check .
 uv run ruff format .
 
-# Type-check (Python 3.14.x)
+# Type-check (Python 3.13.x)
 uv run pyright
 
 # Build the package
@@ -306,9 +305,9 @@ uv run resolver-inventory refresh \
 
 ## CI
 
-- **`ci.yml`** – lint, type-check, unit tests (matrix: Linux/macOS/Windows), integration tests, build
-- **`release.yml`** – builds and publishes to PyPI via trusted publishing on `v*` tags
-- **`refresh.yml`** – scheduled/manual multi-job pipeline:
+- **`ci.yml`** - lint, type-check, unit tests (matrix: Linux/macOS/Windows), integration tests, build
+- **`release.yml`** - builds and publishes to PyPI via trusted publishing on `v*` tags
+- **`refresh.yml`** - scheduled/manual multi-job pipeline:
   1. build the Docker probe-corpus generator
   2. generate `outputs/probe-corpus/probe-corpus.json`
   3. validate the generated corpus

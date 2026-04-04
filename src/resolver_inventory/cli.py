@@ -474,7 +474,7 @@ def cmd_export(args: argparse.Namespace) -> int:
     try:
         results = [validation_result_from_dict(item) for item in load_json_list(in_path)]
     except FileNotFoundError:
-        logger.error("Input file not found: %s — run 'validate' first", in_path)
+        logger.error("Input file not found: %s - run 'validate' first", in_path)
         return 1
 
     fmt = args.format
