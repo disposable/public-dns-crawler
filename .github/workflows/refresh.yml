@@ -52,11 +52,19 @@ jobs:
           name: probe-corpus
           path: outputs/probe-corpus/
       - name: Refresh using generated probe corpus
+        id: refresh
         run: >
           uv run resolver-inventory refresh
           --config configs/default.toml
           --probe-corpus outputs/probe-corpus/probe-corpus.json
           --output outputs/latest
+      - name: Report results
+        run: |
+          echo "Candidates discovered: ${{ steps.refresh.outputs.candidates_total }}"
+          echo "Accepted: ${{ steps.refresh.outputs.results_accepted }}"
+          echo "Candidate: ${{ steps.refresh.outputs.results_candidate }}"
+          echo "Rejected: ${{ steps.refresh.outputs.results_rejected }}"
+          echo "Output directory: ${{ steps.refresh.outputs.output_dir }}"
       - uses: actions/upload-artifact@v4
         with:
           name: refreshed-resolver-data

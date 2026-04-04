@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import argparse
+import os
 import sys
 from pathlib import Path
 from typing import TYPE_CHECKING
@@ -13,6 +14,33 @@ logger = get_logger(__name__)
 
 if TYPE_CHECKING:
     from resolver_inventory.settings import Settings
+
+
+def _github_output(name: str, value: str) -> None:
+    """Write a key-value pair to GITHUB_OUTPUT if running in GitHub Actions."""
+    if os.environ.get("GITHUB_ACTIONS") == "true":
+        output_file = os.environ.get("GITHUB_OUTPUT")
+        if output_file:
+            with open(output_file, "a", encoding="utf-8") as f:
+                f.write(f"{name}={value}\n")
+
+
+def _github_group(title: str) -> None:
+    """Start a collapsible group in GitHub Actions logs."""
+    if os.environ.get("GITHUB_ACTIONS") == "true":
+        print(f"::group::{title}", flush=True)
+
+
+def _github_endgroup() -> None:
+    """End a collapsible group in GitHub Actions logs."""
+    if os.environ.get("GITHUB_ACTIONS") == "true":
+        print("::endgroup::", flush=True)
+
+
+def _github_notice(message: str) -> None:
+    """Emit a notice annotation in GitHub Actions."""
+    if os.environ.get("GITHUB_ACTIONS") == "true":
+        print(f"::notice::{message}", flush=True)
 
 
 def _apply_probe_corpus_override(args: argparse.Namespace, settings: Settings) -> None:
@@ -76,6 +104,7 @@ def cmd_validate(args: argparse.Namespace) -> int:
     settings = load_settings(args.config)
     _apply_probe_corpus_override(args, settings)
 
+    _github_group("Discovery")
     if args.input:
         raw = json.loads(Path(args.input).read_text())
         from resolver_inventory.models import Candidate
@@ -92,12 +121,18 @@ def cmd_validate(args: argparse.Namespace) -> int:
             )
             for r in raw
         ]
+        logger.info("Loaded %d candidates from %s", len(candidates), args.input)
     else:
         raw_candidates = discover_candidates(settings)
         candidates = normalize_dns_candidates(raw_candidates) + normalize_doh_candidates(
             raw_candidates
         )
+        logger.info("Discovered %d normalized candidates", len(candidates))
+    _github_endgroup()
 
+    _github_output("candidates_total", str(len(candidates)))
+
+    _github_group("Validation")
     logger.info("Validating %d candidates…", len(candidates))
     results = validate_candidates(candidates, settings)
 
@@ -110,10 +145,24 @@ def cmd_validate(args: argparse.Namespace) -> int:
         candidate_count,
         rejected,
     )
+    _github_endgroup()
 
+    _github_output("results_accepted", str(accepted))
+    _github_output("results_candidate", str(candidate_count))
+    _github_output("results_rejected", str(rejected))
+    _github_output("results_total", str(len(results)))
+    _github_notice(
+        f"Validation complete: {accepted} accepted, "
+        f"{candidate_count} candidate, {rejected} rejected"
+    )
+
+    _github_group("Export")
     out_path = args.output or "outputs/validated.json"
     export_json(results, accepted_only=False, path=out_path)
     logger.info("Wrote results to %s", out_path)
+    _github_output("output_path", str(Path(out_path).resolve()))
+    _github_endgroup()
+
     return 0
 
 
@@ -134,27 +183,64 @@ def cmd_refresh(args: argparse.Namespace) -> int:
     out_dir = Path(args.output or settings.export.output_dir)
     out_dir.mkdir(parents=True, exist_ok=True)
 
+    _github_group("Discovery")
     raw = discover_candidates(settings)
     candidates = normalize_dns_candidates(raw) + normalize_doh_candidates(raw)
     logger.info("Discovered %d normalized candidates", len(candidates))
+    _github_output("candidates_total", str(len(candidates)))
+    _github_endgroup()
 
+    _github_group("Validation")
     results = validate_candidates(candidates, settings)
     accepted = [r for r in results if r.accepted]
-    logger.info("%d/%d candidates accepted", len(accepted), len(results))
+    accepted_count = len(accepted)
+    total_count = len(results)
+    logger.info("%d/%d candidates accepted", accepted_count, total_count)
 
+    accepted_status = sum(1 for r in results if r.status == "accepted")
+    candidate_status = sum(1 for r in results if r.status == "candidate")
+    rejected_status = sum(1 for r in results if r.status == "rejected")
+
+    _github_output("results_accepted", str(accepted_status))
+    _github_output("results_candidate", str(candidate_status))
+    _github_output("results_rejected", str(rejected_status))
+    _github_output("results_total", str(total_count))
+    _github_notice(
+        f"Pipeline complete: {accepted_status} accepted, "
+        f"{candidate_status} candidate, {rejected_status} rejected"
+    )
+    _github_endgroup()
+
+    _github_group("Export")
     formats = settings.export.formats
+    exported_files: list[str] = []
     if "json" in formats:
-        export_json(results, accepted_only=False, path=out_dir / "validated.json")
-        export_json(results, accepted_only=True, path=out_dir / "accepted.json")
+        p1 = out_dir / "validated.json"
+        p2 = out_dir / "accepted.json"
+        export_json(results, accepted_only=False, path=p1)
+        export_json(results, accepted_only=True, path=p2)
+        exported_files.extend([str(p1), str(p2)])
     if "text" in formats:
-        export_text(results, path=out_dir / "resolvers.txt")
-        export_text(results, include_doh=True, path=out_dir / "resolvers-doh.txt")
+        p1 = out_dir / "resolvers.txt"
+        p2 = out_dir / "resolvers-doh.txt"
+        export_text(results, path=p1)
+        export_text(results, include_doh=True, path=p2)
+        exported_files.extend([str(p1), str(p2)])
     if "dnsdist" in formats:
-        export_dnsdist(results, path=out_dir / "dnsdist.conf")
+        p = out_dir / "dnsdist.conf"
+        export_dnsdist(results, path=p)
+        exported_files.append(str(p))
     if "unbound" in formats:
-        export_unbound(results, path=out_dir / "unbound-forward.conf")
+        p = out_dir / "unbound-forward.conf"
+        export_unbound(results, path=p)
+        exported_files.append(str(p))
 
+    _github_output("output_dir", str(out_dir.resolve()))
+    _github_output("exported_files", ",".join(exported_files))
+    _github_output("accepted_count", str(accepted_count))
     logger.info("Outputs written to %s", out_dir)
+    _github_endgroup()
+
     return 0
 
 
