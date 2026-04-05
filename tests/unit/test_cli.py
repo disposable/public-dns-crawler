@@ -386,7 +386,6 @@ class TestGenerateProbeCorpusCommand:
 
         assert rc == 0
         assert (tmp_path / "out" / "probe-corpus.json").exists()
-        assert (tmp_path / "out" / "probe-corpus.yaml").exists()
         assert (tmp_path / "out" / "metadata.json").exists()
         assert (tmp_path / "out" / "SUMMARY.md").exists()
 

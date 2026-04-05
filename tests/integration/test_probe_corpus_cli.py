@@ -138,7 +138,6 @@ class TestProbeCorpusCli:
 
         assert validate.returncode == 0, validate.stderr
         assert corpus_path.exists()
-        assert (output_dir / "probe-corpus.yaml").exists()
         assert (output_dir / "metadata.json").exists()
         assert (output_dir / "SUMMARY.md").exists()
 

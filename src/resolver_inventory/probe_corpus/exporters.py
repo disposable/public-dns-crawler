@@ -16,8 +16,6 @@ def write_probe_corpus_outputs(result: GeneratedProbeCorpusResult, output_dir: s
     report = result.report
     payload = probe_corpus_to_dict(corpus)
     (out_dir / "probe-corpus.json").write_text(json.dumps(payload, indent=2), encoding="utf-8")
-    # JSON is valid YAML 1.2, which keeps this exporter dependency-free for now.
-    (out_dir / "probe-corpus.yaml").write_text(json.dumps(payload, indent=2), encoding="utf-8")
     metadata = {
         "schema_version": corpus.schema_version,
         "corpus_version": corpus.corpus_version,
