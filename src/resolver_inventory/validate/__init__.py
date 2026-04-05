@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
+import random
 from collections.abc import Callable
 from dataclasses import dataclass
 
@@ -89,8 +90,12 @@ async def _validate_all(
     if total == 0:
         return []
 
+    # Shuffle so we don't hit any single provider or IP block with sequential bursts.
+    shuffled = list(candidates)
+    random.shuffle(shuffled)
+
     work_queue: asyncio.Queue[tuple[int, Candidate]] = asyncio.Queue()
-    for index, candidate in enumerate(candidates):
+    for index, candidate in enumerate(shuffled):
         work_queue.put_nowait((index, candidate))
 
     results: list[ValidationResult | None] = [None] * total
