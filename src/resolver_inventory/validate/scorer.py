@@ -6,7 +6,11 @@ from dataclasses import dataclass, field
 from datetime import date
 from typing import TYPE_CHECKING
 
-from resolver_inventory.history import ResolverStabilityMetrics, get_resolver_stability_metrics
+from resolver_inventory.history import (
+    ResolverStabilityMetrics,
+    get_resolver_stability_metrics,
+    normalize_resolver_key,
+)
 from resolver_inventory.models import Candidate, ProbeResult, ValidationResult
 from resolver_inventory.settings import Settings
 
@@ -607,10 +611,10 @@ def score(
     metrics: ResolverStabilityMetrics | None = None
     if history_connection is not None and run_date is not None:
         try:
+            resolver_key = normalize_resolver_key(candidate)
             metrics = get_resolver_stability_metrics(
                 history_connection,
-                candidate.host,
-                candidate.transport,
+                resolver_key,
                 run_date,
             )
         except Exception:
@@ -665,12 +669,9 @@ def score(
     if final_score >= 100:
         final_score = _apply_perfect_score_requirements(probes, metrics, components, reasons)
 
-    # Check for UDP-only warning
-    if candidate.transport in ("dns-udp",) and not any(
-        p.probe.startswith("dns-tcp") for p in probes
-    ):
-        if "udp_only" not in reasons:
-            reasons.append("udp_only")
+    # Flag UDP-only transport (dns-udp candidates are never cross-tested with TCP)
+    if candidate.transport == "dns-udp" and "udp_only" not in reasons:
+        reasons.append("udp_only")
 
     return ValidationResult(
         candidate=candidate,

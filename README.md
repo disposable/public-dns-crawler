@@ -457,6 +457,66 @@ These helper scripts are used by the parent data repo workflow and are intention
 - `scripts/update_history.py` - updates `meta/history.duckdb` from `validated.json`, `filtered.json`, and build metadata
 - `scripts/generate_stats_report.py` - regenerates the `<!-- GENERATED_STATS_* -->` README statistics section from history data
 - `scripts/analyze_scores.py` - analyzes score distribution from validation results and can compare before/after runs
+- `scripts/analyze_history.py` - inspects history database and prints diagnostics about resolver history coverage
+
+## History System
+
+The crawler maintains historical data in `meta/history.duckdb` using DuckDB. The history system tracks resolver status over time to support:
+
+1. **Score history caps** - resolvers with insufficient observation history get capped scores
+2. **DNS host quarantine** - hosts rejected for 14+ consecutive days are temporarily excluded
+3. **Stability metrics** - streaks, flapping detection, and success rate tracking
+
+### Schema Overview
+
+The history database uses a v2 schema with three main tables:
+
+**runs_v2** - Run-level metadata with unique `run_id` supporting multiple runs per day:
+- `run_id`, `run_date`, `run_started_at`, `generated_at`
+- `github_run_id`, `repo_sha`, `crawler_sha`, `run_type`
+
+**resolver_run_status** - Per-resolver status for each run (allows intra-day runs):
+- `run_id`, `resolver_key`, `host`, `transport`, `endpoint_url`, `port`, `path`
+- `status`, `reasons_signature`, `reasons_json`
+- `accepted_probe_count`, `failed_probe_count`, `total_probe_count`
+- `p50_latency_ms`, `p95_latency_ms`, `jitter_ms`
+
+**resolver_daily** - Daily rollup aggregating all runs per day:
+- `run_date`, `resolver_key`, `host`, `transport`
+- `day_status`, `reasons_signature`, `reasons_json`
+- `runs_that_day`, `successful_runs_that_day`, `failed_runs_that_day`
+- `flapped_within_day`
+- `p50_latency_ms`, `p95_latency_ms`, `jitter_ms`
+
+### Resolver Identity (resolver_key)
+
+History is tracked per-endpoint using a canonical `resolver_key`:
+
+- **DNS UDP**: `dns-udp|host|port` (e.g., `dns-udp|1.1.1.1|53`)
+- **DNS TCP**: `dns-tcp|host|port` (e.g., `dns-tcp|1.1.1.1|53`)
+- **DoH**: `doh|url` (e.g., `doh|https://dns.example.com/dns-query`)
+
+This allows:
+- Same host on different transports to have independent history
+- Different DoH endpoints on same host to be tracked separately
+- Accurate per-endpoint scoring and caps
+
+### Migration
+
+Existing history databases are automatically migrated from the legacy schema (v1) to v2 on first connection. The migration:
+1. Creates new v2 tables alongside legacy tables
+2. Backfills `resolver_daily` from legacy `dns_host_daily` data
+3. Records migration status in `schema_metadata` table
+
+### Intra-day Run Support
+
+The schema supports multiple validation runs per day:
+- Multiple entries in `runs_v2` with same `run_date` but different `run_id`
+- Multiple entries in `resolver_run_status` per run
+- `resolver_daily` aggregates all runs for a day into one row
+- History counting uses distinct days, not raw run counts
+
+This allows future 4x/day scheduling without inflating "days of history" counts.
 
 ## License
 
