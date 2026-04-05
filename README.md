@@ -9,7 +9,7 @@ Aggregate, validate, score, and export public DNS and DoH resolvers.
 - **Full endpoint metadata** - DoH records preserve URL, host, port, path, TLS server name, bootstrap IPs, and provenance
 - **Active validation** - reachability, NXDOMAIN fidelity, latency, consistency, TLS validity
 - **Pluggable test corpus** - controlled zone, local external JSON corpus, or tiny built-in fallback
-- **Scored output** - `accepted` / `candidate` / `rejected` with machine-readable reason codes
+- **Scored output** - component-based scoring (correctness, availability, performance, history) with separate confidence score, score caps, and derived metrics
 - **Multiple export formats** - JSON, plain text, dnsdist config, Unbound forward-zone
 
 ## Source feeds
@@ -232,7 +232,7 @@ flowchart TD
     R2 -->|exact_rrset| R3[query candidate over plain DNS<br/>normalize RRset<br/>compare with expected_answers]
     R2 -->|consensus_match| R4[query candidate over plain DNS<br/>query trusted baselines<br/>compare unordered normalized answers]
     R2 -->|nxdomain| R5[expand qname_template at runtime<br/>query candidate over plain DNS<br/>require negative response without spoofing]
-    R3 --> T[score results]
+    R3 --> T[score results<br/>load history<br/>compute components<br/>apply caps]
     R4 --> T
     R5 --> T
 
@@ -360,8 +360,12 @@ JSON exports include these new fields:
     "p50_latency_ms": 45.2,
     "p95_latency_ms": 120.5,
     "jitter_ms": 75.3,
+    "latency_sample_count": 10,
     "runs_seen_30d": 5,
-    "flaps_30d": 0
+    "runs_seen_7d": 3,
+    "flaps_30d": 0,
+    "consecutive_success_days": 5,
+    "consecutive_fail_days": 0
   }
 }
 ```
@@ -452,6 +456,7 @@ These helper scripts are used by the parent data repo workflow and are intention
 - `scripts/apply_history_quarantine.py` - drops currently quarantined plain DNS hosts from discovered candidates and appends `historical_dns_quarantine` entries to `filtered.json`
 - `scripts/update_history.py` - updates `meta/history.duckdb` from `validated.json`, `filtered.json`, and build metadata
 - `scripts/generate_stats_report.py` - regenerates the `<!-- GENERATED_STATS_* -->` README statistics section from history data
+- `scripts/analyze_scores.py` - analyzes score distribution from validation results and can compare before/after runs
 
 ## License
 
