@@ -201,13 +201,25 @@ class TestSourceReliability:
 class TestHistoryCaps:
     """Test history-based score caps."""
 
-    def test_no_history_caps_score_at_90(self) -> None:
+    def test_no_history_does_not_add_history_caps_or_reasons(self) -> None:
         candidate = _candidate()
         probes = [_ok() for _ in range(10)]
         result = score(candidate, probes, Settings())
-        # Without history connection, should be capped
-        assert result.score <= 90
-        assert "insufficient_history" in result.score_caps_applied
+        assert result.history_score == 0
+        assert "no_history" not in result.reasons
+        assert all(not cap.startswith("insufficient_history") for cap in result.score_caps_applied)
+
+    def test_no_history_entry_skips_history_logic(self) -> None:
+        with patch("resolver_inventory.validate.scorer.get_resolver_stability_metrics") as mock:
+            mock.return_value = None
+            result = score(
+                _candidate(), [_ok() for _ in range(10)], Settings(), MagicMock(), date.today()
+            )
+            assert result.history_score == 0
+            assert "no_history" not in result.reasons
+            assert all(
+                not cap.startswith("insufficient_history") for cap in result.score_caps_applied
+            )
 
     def test_few_runs_caps_score(self) -> None:
         # Mock history with only 2 runs
@@ -278,8 +290,7 @@ class TestPerfectScoreRequirements:
     def test_perfect_resolver_no_history_gets_99(self) -> None:
         probes = [_ok(ms=50.0) for _ in range(20)]
         result = score(_candidate(), probes, Settings())
-        # Perfect probes but no history should cap at 90
-        assert result.score <= 90
+        assert "insufficient_history_for_100" not in result.score_caps_applied
 
     def test_score_100_requires_no_correctness_issues(self) -> None:
         mock_metrics = ResolverStabilityMetrics(
@@ -417,7 +428,7 @@ class TestScoreExplainability:
         probes = [_ok() for _ in range(10)]
         result = score(_candidate(), probes, Settings())
         assert isinstance(result.score_caps_applied, list)
-        # Should have at least the insufficient_history cap without mock
+        # Missing source reliability metadata should be reported as a cap.
         assert len(result.score_caps_applied) > 0
 
     def test_derived_metrics_present(self) -> None:

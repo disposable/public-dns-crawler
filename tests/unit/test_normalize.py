@@ -149,6 +149,31 @@ class TestNormalizeDoh:
         result = normalize_doh_candidates([c])
         assert len(result) == 1
         assert result[0].host == "dns.example.com"
+        assert result[0].endpoint_url == "https://dns.example.com/dns-query"
+
+    def test_path_case_and_query_are_preserved(self) -> None:
+        c = _doh("https://DNS.Example.COM/DNS-Query?name=Example.COM&cd=0")
+        result = normalize_doh_candidates([c])
+        assert len(result) == 1
+        assert result[0].endpoint_url == "https://dns.example.com/DNS-Query?name=Example.COM&cd=0"
+
+    def test_distinct_doh_paths_are_not_merged(self) -> None:
+        result = normalize_doh_candidates(
+            [
+                _doh("https://dns.example.com/dns-query"),
+                _doh("https://dns.example.com/DNS-Query"),
+            ]
+        )
+        assert len(result) == 2
+
+    def test_default_port_is_normalized(self) -> None:
+        result = normalize_doh_candidates(
+            [
+                _doh("https://dns.example.com:443/dns-query"),
+                _doh("https://dns.example.com/dns-query"),
+            ]
+        )
+        assert len(result) == 1
 
     def test_tls_server_name_preserved(self) -> None:
         result = normalize_doh_candidates([_doh("https://dns.example.com/dns-query")])

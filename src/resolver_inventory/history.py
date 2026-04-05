@@ -17,13 +17,37 @@ from resolver_inventory.models import (
     Status,
     ValidationResult,
 )
+from resolver_inventory.util.url import canonicalize_doh_url
 
 HISTORY_RETENTION_DAYS = 30
 DNS_QUARANTINE_STREAK_DAYS = 14
 DNS_QUARANTINE_DAYS = 90
 
-# Schema version for migration tracking
-HISTORY_SCHEMA_VERSION = 2
+# Schema version for current history schema.
+HISTORY_SCHEMA_VERSION = 3
+
+CURRENT_HISTORY_TABLES = {
+    "schema_metadata",
+    "runs",
+    "resolver_run_status",
+    "resolver_daily",
+    "dns_host_quarantine",
+}
+
+LEGACY_HISTORY_TABLES = {
+    "run_stats",
+    "dns_host_daily",
+}
+
+SEVERE_CORRECTNESS_REASONS: frozenset[str] = frozenset(
+    {
+        "nxdomain_spoofing",
+        "tls_name_mismatch",
+        "tls_error",
+        "answer_mismatch",
+        "doh_path_invalid",
+    }
+)
 
 
 def normalize_resolver_key(candidate: Candidate) -> str:
@@ -32,7 +56,7 @@ def normalize_resolver_key(candidate: Candidate) -> str:
     Format:
     - dns-udp|host|port
     - dns-tcp|host|port
-    - doh|url (normalized)
+    - doh|url (canonicalized)
 
     This allows distinguishing:
     - Same host, different transports (UDP vs TCP)
@@ -40,10 +64,9 @@ def normalize_resolver_key(candidate: Candidate) -> str:
     - Different ports on same host
     """
     if candidate.transport == "doh":
-        # For DoH, use the full URL as the identity
-        url = candidate.endpoint_url or ""
-        # Normalize: lowercase, remove trailing slash
-        url = url.lower().rstrip("/")
+        url = canonicalize_doh_url(candidate.endpoint_url or "")
+        if not url:
+            url = candidate.endpoint_url or ""
         return f"doh|{url}"
     else:
         # For plain DNS, use transport|host|port
@@ -55,19 +78,19 @@ def parse_resolver_key(resolver_key: str) -> tuple[str, str, int | None]:
 
     Returns: (transport, host_or_url, port_or_none)
     """
-    parts = resolver_key.split("|", 2)
-    if len(parts) < 2:
+    transport, sep, remainder = resolver_key.partition("|")
+    if not sep:
         return ("unknown", resolver_key, None)
 
-    transport = parts[0]
     if transport == "doh":
-        # DoH: transport|url — url may contain no further separators
-        return (transport, parts[1], None)
-    else:
-        # DNS: transport|host|port
-        host = parts[1]
-        port = int(parts[2]) if len(parts) > 2 else 53
-        return (transport, host, port)
+        return (transport, remainder, None)
+
+    host, _, port_text = remainder.partition("|")
+    try:
+        port = int(port_text) if port_text else 53
+    except ValueError:
+        port = 53
+    return (transport, host, port)
 
 
 @dataclass(slots=True)
@@ -82,7 +105,7 @@ class RunMetadata:
 
 @dataclass(slots=True)
 class RunInfo:
-    """Extended run metadata for runs_v2 table."""
+    """Extended run metadata for runs table."""
 
     run_id: str  # Unique run identifier (e.g., github_run_id + timestamp)
     run_date: date
@@ -170,7 +193,7 @@ class ResolverStabilityMetrics:
     latest_status: str | None = None
     flapped_within_day_7d: int = 0  # Days with intra-day flapping
     flapped_within_day_30d: int = 0
-    resolver_key: str = ""  # Optional: set when using v2 resolver_key-based lookups
+    resolver_key: str = ""  # Optional: set when using resolver_key-based lookups
 
     def has_minimum_history(self, min_runs: int = 14) -> bool:
         """Check if resolver has enough historical observations."""
@@ -242,55 +265,62 @@ def connect_history_db(path: str | Path):
 
 
 def ensure_history_schema(connection) -> None:
-    """Ensure all history tables exist with current schema version."""
-    # Schema metadata table for version tracking
+    """Ensure history schema exists and rebuild cleanly on incompatibility."""
+    existing_tables = _list_history_tables(connection)
+    if _schema_needs_rebuild(connection, existing_tables):
+        _recreate_history_schema(connection)
+        return
+
+    _create_current_schema(connection)
+    _write_schema_version(connection)
+
+
+def _check_schema_version(connection) -> int:
+    """Check current schema version, returns 0 if no version recorded."""
+    try:
+        row = connection.execute(
+            "SELECT value FROM schema_metadata WHERE key = 'schema_version'"
+        ).fetchone()
+        return int(row[0]) if row else 0
+    except Exception:
+        return 0
+
+
+def _list_history_tables(connection) -> set[str]:
+    rows = connection.execute(
+        """
+        SELECT table_name
+        FROM information_schema.tables
+        WHERE table_schema = current_schema()
+        """
+    ).fetchall()
+    return {row[0] for row in rows}
+
+
+def _schema_needs_rebuild(connection, existing_tables: set[str]) -> bool:
+    if not existing_tables:
+        return False
+    if existing_tables.intersection(LEGACY_HISTORY_TABLES):
+        return True
+    if not CURRENT_HISTORY_TABLES.issubset(existing_tables):
+        return True
+    return _check_schema_version(connection) != HISTORY_SCHEMA_VERSION
+
+
+def _recreate_history_schema(connection) -> None:
+    for table in sorted(CURRENT_HISTORY_TABLES.union(LEGACY_HISTORY_TABLES)):
+        connection.execute(f"DROP TABLE IF EXISTS {table}")
+    _create_current_schema(connection)
+    _write_schema_version(connection)
+
+
+def _create_current_schema(connection) -> None:
     connection.execute(
         """
         CREATE TABLE IF NOT EXISTS schema_metadata (
             key VARCHAR PRIMARY KEY,
             value VARCHAR,
             updated_at TIMESTAMP
-        )
-        """
-    )
-
-    # Legacy tables (kept for compatibility during migration)
-    connection.execute(
-        """
-        CREATE TABLE IF NOT EXISTS runs (
-            run_date DATE PRIMARY KEY,
-            generated_at TIMESTAMP,
-            github_run_id VARCHAR,
-            repo_sha VARCHAR,
-            crawler_sha VARCHAR
-        )
-        """
-    )
-    connection.execute(
-        """
-        CREATE TABLE IF NOT EXISTS run_stats (
-            run_date DATE PRIMARY KEY,
-            accepted_count INTEGER,
-            candidate_count INTEGER,
-            rejected_count INTEGER,
-            filtered_count INTEGER
-        )
-        """
-    )
-    connection.execute(
-        """
-        CREATE TABLE IF NOT EXISTS dns_host_daily (
-            run_date DATE,
-            host VARCHAR,
-            status VARCHAR,
-            reasons_signature VARCHAR,
-            reasons_json VARCHAR,
-            accepted_count INTEGER,
-            candidate_count INTEGER,
-            rejected_count INTEGER,
-            udp_status VARCHAR,
-            tcp_status VARCHAR,
-            PRIMARY KEY (run_date, host)
         )
         """
     )
@@ -307,13 +337,9 @@ def ensure_history_schema(connection) -> None:
         )
         """
     )
-
-    # NEW v2 schema tables
-
-    # 1) runs_v2 - run-level metadata with unique run_id
     connection.execute(
         """
-        CREATE TABLE IF NOT EXISTS runs_v2 (
+        CREATE TABLE IF NOT EXISTS runs (
             run_id VARCHAR PRIMARY KEY,
             run_date DATE,
             run_started_at TIMESTAMP,
@@ -325,9 +351,6 @@ def ensure_history_schema(connection) -> None:
         )
         """
     )
-
-    # 2) resolver_run_status - per-resolver status for each run
-    # Allows multiple runs per day
     connection.execute(
         """
         CREATE TABLE IF NOT EXISTS resolver_run_status (
@@ -351,9 +374,6 @@ def ensure_history_schema(connection) -> None:
         )
         """
     )
-
-    # 3) resolver_daily - daily rollup across all runs in a day
-    # History-based scoring reads from this table
     connection.execute(
         """
         CREATE TABLE IF NOT EXISTS resolver_daily (
@@ -376,7 +396,8 @@ def ensure_history_schema(connection) -> None:
         """
     )
 
-    # Record schema version
+
+def _write_schema_version(connection) -> None:
     connection.execute(
         """
         INSERT OR REPLACE INTO schema_metadata (key, value, updated_at)
@@ -386,89 +407,22 @@ def ensure_history_schema(connection) -> None:
     )
 
 
-def _check_schema_version(connection) -> int:
-    """Check current schema version, returns 0 if no version recorded."""
-    try:
-        row = connection.execute(
-            "SELECT value FROM schema_metadata WHERE key = 'schema_version'"
-        ).fetchone()
-        return int(row[0]) if row else 0
-    except Exception:
-        return 0
-
-
 def update_history(
     connection,
     metadata: RunMetadata,
     results: list[ValidationResult],
     filtered: list[FilteredCandidate],
 ) -> None:
-    """Update history with run-level and daily rollup data.
-
-    Writes to both legacy tables (for migration compatibility) and new v2 tables.
-    """
-    # Generate unique run_id for v2 tables
+    """Update history with run-level and daily rollup data."""
+    _ = filtered
+    # Generate unique run_id for run-level tables
     run_id = f"{metadata.github_run_id}_{metadata.generated_at.isoformat()}"
     run_started_at = metadata.generated_at  # For now, same as generated_at
 
-    accepted_count = sum(1 for result in results if result.status == "accepted")
-    candidate_count = sum(1 for result in results if result.status == "candidate")
-    rejected_count = sum(1 for result in results if result.status == "rejected")
-
-    # --- Write to legacy tables (for migration compatibility) ---
+    # 1) Insert into runs
     connection.execute(
         """
-        INSERT OR REPLACE INTO runs VALUES (?, ?, ?, ?, ?)
-        """,
-        [
-            metadata.run_date,
-            metadata.generated_at.replace(tzinfo=None),
-            metadata.github_run_id,
-            metadata.repo_sha,
-            metadata.crawler_sha,
-        ],
-    )
-    connection.execute(
-        """
-        INSERT OR REPLACE INTO run_stats VALUES (?, ?, ?, ?, ?)
-        """,
-        [
-            metadata.run_date,
-            accepted_count,
-            candidate_count,
-            rejected_count,
-            len(filtered),
-        ],
-    )
-
-    # Legacy: only DNS host outcomes
-    dns_outcomes = derive_dns_host_outcomes(results)
-    connection.execute("DELETE FROM dns_host_daily WHERE run_date = ?", [metadata.run_date])
-    for outcome in dns_outcomes:
-        connection.execute(
-            """
-            INSERT INTO dns_host_daily VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-            """,
-            [
-                metadata.run_date,
-                outcome.host,
-                outcome.status,
-                outcome.reasons_signature,
-                json.dumps(outcome.reasons),
-                outcome.accepted_count,
-                outcome.candidate_count,
-                outcome.rejected_count,
-                outcome.udp_status,
-                outcome.tcp_status,
-            ],
-        )
-
-    # --- Write to new v2 tables ---
-
-    # 1) Insert into runs_v2
-    connection.execute(
-        """
-        INSERT OR REPLACE INTO runs_v2
+        INSERT OR REPLACE INTO runs
         VALUES (?, ?, ?, ?, ?, ?, ?, ?)
         """,
         [
@@ -531,8 +485,7 @@ def update_history(
     # 3) Aggregate daily rollups for this run_date
     _update_resolver_daily(connection, metadata.run_date)
 
-    # --- Refresh quarantine state (uses legacy dns_host_daily for now) ---
-    _refresh_quarantine_state(connection, metadata.run_date, dns_outcomes)
+    _refresh_quarantine_state(connection, metadata.run_date)
     prune_history(connection, metadata.run_date)
 
 
@@ -540,89 +493,88 @@ def _update_resolver_daily(connection, run_date: date) -> None:
     """Aggregate resolver_run_status into resolver_daily for a given date.
 
     Rules for day_status aggregation:
-    - accepted: at least one run is accepted and none rejected for severe issues
-    - candidate: mixed/partial quality
-    - rejected: all runs rejected or severe correctness issues consistently present
+    - accepted: at least one accepted run and no severe correctness reasons
+    - candidate: mixed statuses without severe correctness reasons
+    - rejected: all runs rejected, or any severe correctness reason is present
     """
-    # Delete existing daily rollup for this date
     connection.execute(
         "DELETE FROM resolver_daily WHERE run_date = ?",
         [run_date],
     )
 
-    # Aggregate from resolver_run_status for this date
     rows = connection.execute(
         """
         SELECT
-            r.run_date,
             rs.resolver_key,
             rs.host,
             rs.transport,
-            COUNT(*) as runs_that_day,
-            SUM(CASE WHEN rs.status = 'accepted' THEN 1 ELSE 0 END) as accepted_runs,
-            SUM(CASE WHEN rs.status = 'candidate' THEN 1 ELSE 0 END) as candidate_runs,
-            SUM(CASE WHEN rs.status = 'rejected' THEN 1 ELSE 0 END) as rejected_runs,
-            MAX(CASE WHEN rs.status = 'accepted' THEN 1 ELSE 0 END) as has_accepted,
-            MAX(CASE WHEN rs.status = 'rejected' THEN 1 ELSE 0 END) as has_rejected,
-            AVG(rs.p50_latency_ms) as avg_p50,
-            AVG(rs.p95_latency_ms) as avg_p95,
-            AVG(rs.jitter_ms) as avg_jitter,
-            -- Collect all reason signatures for the day
-            STRING_AGG(DISTINCT rs.reasons_signature, '|') as all_reasons
-        FROM runs_v2 r
+            rs.status,
+            rs.reasons_json,
+            rs.p50_latency_ms,
+            rs.p95_latency_ms,
+            rs.jitter_ms
+        FROM runs r
         JOIN resolver_run_status rs ON r.run_id = rs.run_id
         WHERE r.run_date = ?
-        GROUP BY r.run_date, rs.resolver_key, rs.host, rs.transport
+        ORDER BY rs.resolver_key
         """,
         [run_date],
     ).fetchall()
 
+    grouped: dict[
+        str, list[tuple[str, str, str, str, str | None, float | None, float | None, float | None]]
+    ] = {}
     for row in rows:
-        (
-            run_date,
-            resolver_key,
-            host,
-            transport,
-            runs_that_day,
-            accepted_runs,
-            candidate_runs,
-            rejected_runs,
-            has_accepted,
-            has_rejected,
-            avg_p50,
-            avg_p95,
-            avg_jitter,
-            all_reasons,
-        ) = row
+        grouped.setdefault(row[0], []).append(row)
 
-        # Determine day_status based on aggregation rules
-        if has_accepted and not has_rejected:
+    for resolver_rows in grouped.values():
+        resolver_key = resolver_rows[0][0]
+        host = resolver_rows[0][1]
+        transport = resolver_rows[0][2]
+        statuses = [row[3] for row in resolver_rows]
+        accepted_runs = sum(1 for status in statuses if status == "accepted")
+        candidate_runs = sum(1 for status in statuses if status == "candidate")
+        rejected_runs = sum(1 for status in statuses if status == "rejected")
+        runs_that_day = len(statuses)
+
+        reasons: set[str] = set()
+        severe_seen = False
+        p50_values: list[float] = []
+        p95_values: list[float] = []
+        jitter_values: list[float] = []
+        for _, _, _, _, reasons_json, p50, p95, jitter in resolver_rows:
+            if reasons_json:
+                parsed_reasons = json.loads(reasons_json)
+                for reason in parsed_reasons:
+                    reasons.add(reason)
+                    if reason in SEVERE_CORRECTNESS_REASONS:
+                        severe_seen = True
+            if p50 is not None:
+                p50_values.append(p50)
+            if p95 is not None:
+                p95_values.append(p95)
+            if jitter is not None:
+                jitter_values.append(jitter)
+
+        if severe_seen:
+            day_status = "rejected"
+        elif accepted_runs > 0 and rejected_runs == 0:
             day_status = "accepted"
-        elif has_accepted and has_rejected:
-            day_status = "candidate"
-        elif has_rejected:
+        elif rejected_runs == runs_that_day:
             day_status = "rejected"
         else:
-            day_status = "candidate"  # Default for edge cases
+            day_status = "candidate"
 
-        # Check for flapping within the day: more than one distinct status seen
         statuses_seen = (accepted_runs > 0) + (candidate_runs > 0) + (rejected_runs > 0)
         flapped_within_day = statuses_seen > 1
 
-        # Normalize reasons for the day
-        all_reasons_list = list(
-            set(
-                reason
-                for sig in (all_reasons or "").split("|")
-                for reason in sig.split("|")
-                if reason
-            )
-        )
+        all_reasons_list = sorted(reasons)
         reasons_signature = normalize_reasons_signature(all_reasons_list)
-
-        # "successful" = accepted; "failed" = rejected; candidate runs are neither
         successful_runs = accepted_runs
         failed_runs = rejected_runs
+        avg_p50 = sum(p50_values) / len(p50_values) if p50_values else None
+        avg_p95 = sum(p95_values) / len(p95_values) if p95_values else None
+        avg_jitter = sum(jitter_values) / len(jitter_values) if jitter_values else None
 
         connection.execute(
             """
@@ -650,19 +602,14 @@ def _update_resolver_daily(connection, run_date: date) -> None:
 
 def prune_history(connection, run_date: date) -> None:
     cutoff = run_date - timedelta(days=HISTORY_RETENTION_DAYS - 1)
-    # Legacy tables
-    connection.execute("DELETE FROM runs WHERE run_date < ?", [cutoff])
-    connection.execute("DELETE FROM run_stats WHERE run_date < ?", [cutoff])
-    connection.execute("DELETE FROM dns_host_daily WHERE run_date < ?", [cutoff])
-    # New v2 tables — delete resolver_run_status before runs_v2 to avoid broken subquery
     connection.execute(
         """
         DELETE FROM resolver_run_status
-        WHERE run_id IN (SELECT run_id FROM runs_v2 WHERE run_date < ?)
+        WHERE run_id IN (SELECT run_id FROM runs WHERE run_date < ?)
         """,
         [cutoff],
     )
-    connection.execute("DELETE FROM runs_v2 WHERE run_date < ?", [cutoff])
+    connection.execute("DELETE FROM runs WHERE run_date < ?", [cutoff])
     connection.execute("DELETE FROM resolver_daily WHERE run_date < ?", [cutoff])
 
 
@@ -730,8 +677,9 @@ def apply_dns_quarantine(
 def _refresh_quarantine_state(
     connection,
     run_date: date,
-    outcomes: list[DnsHostOutcome],
 ) -> None:
+    outcomes = _load_dns_host_outcomes_for_day(connection, run_date)
+
     existing_rows = connection.execute(
         """
         SELECT host, first_quarantined_on, last_quarantined_on, retry_after,
@@ -788,6 +736,53 @@ def _refresh_quarantine_state(
                     cycles=1,
                 ),
             )
+
+
+def _load_dns_host_outcomes_for_day(connection, run_date: date) -> list[DnsHostOutcome]:
+    rows = connection.execute(
+        """
+        SELECT host, day_status, reasons_json
+        FROM resolver_daily
+        WHERE run_date = ?
+          AND transport IN ('dns-udp', 'dns-tcp')
+        """,
+        [run_date],
+    ).fetchall()
+
+    grouped: dict[str, list[tuple[str, str | None]]] = {}
+    for host, day_status, reasons_json in rows:
+        grouped.setdefault(host, []).append((day_status, reasons_json))
+
+    outcomes: list[DnsHostOutcome] = []
+    for host, host_rows in grouped.items():
+        statuses = [row[0] for row in host_rows]
+        if "accepted" in statuses:
+            status: Status = "accepted"
+        elif "candidate" in statuses:
+            status = "candidate"
+        else:
+            status = "rejected"
+
+        reasons: set[str] = set()
+        for _, reasons_json in host_rows:
+            if reasons_json:
+                reasons.update(json.loads(reasons_json))
+        normalized_reasons = sorted(reasons)
+        outcomes.append(
+            DnsHostOutcome(
+                host=host,
+                status=status,
+                reasons=normalized_reasons,
+                reasons_signature=normalize_reasons_signature(normalized_reasons),
+                accepted_count=statuses.count("accepted"),
+                candidate_count=statuses.count("candidate"),
+                rejected_count=statuses.count("rejected"),
+                udp_status=None,
+                tcp_status=None,
+            )
+        )
+
+    return sorted(outcomes, key=lambda outcome: outcome.host)
 
 
 def _has_rejected_streak(connection, host: str, run_date: date) -> bool:
@@ -864,101 +859,36 @@ def read_run_metadata(
 
 
 def compute_latest_summary(connection) -> dict[str, Any]:
-    """Compute summary statistics from history.
-
-    Uses new v2 tables if available, falls back to legacy tables.
-    """
-    # Try new v2 tables first
+    """Compute summary statistics from the current history schema."""
     latest_run = connection.execute(
         """
         SELECT run_date, github_run_id
-        FROM runs_v2
+        FROM runs
         ORDER BY run_date DESC, run_started_at DESC
         LIMIT 1
         """
     ).fetchone()
 
     if latest_run is None:
-        # Fall back to legacy tables
-        latest_run = connection.execute(
-            """
-            SELECT r.run_date, r.github_run_id, s.accepted_count, s.candidate_count,
-                   s.rejected_count, s.filtered_count
-            FROM runs r
-            JOIN run_stats s USING (run_date)
-            ORDER BY r.run_date DESC
-            LIMIT 1
-            """
-        ).fetchone()
-
-        if latest_run is None:
-            return {
-                "latest_run_date": None,
-                "latest_run_id": None,
-                "runs_tracked": 0,
-                "accepted_count": 0,
-                "candidate_count": 0,
-                "rejected_count": 0,
-                "filtered_count": 0,
-                "accepted_delta": 0,
-                "rejected_delta": 0,
-                "quarantined_count": 0,
-                "top_reasons": [],
-            }
-
-        # Legacy stats calculation
-        oldest_run = connection.execute(
-            """
-            SELECT accepted_count, rejected_count
-            FROM run_stats
-            ORDER BY run_date ASC
-            LIMIT 1
-            """
-        ).fetchone()
-        runs_tracked = connection.execute("SELECT COUNT(*) FROM runs").fetchone()[0]
-        quarantined_count = connection.execute(
-            """
-            SELECT COUNT(*)
-            FROM dns_host_quarantine
-            WHERE retry_after > ?
-            """,
-            [latest_run[0]],
-        ).fetchone()[0]
-
-        reason_counts: dict[str, int] = {}
-        rejected_rows = connection.execute(
-            """
-            SELECT reasons_json
-            FROM dns_host_daily
-            WHERE status = 'rejected'
-            """
-        ).fetchall()
-        for (reasons_json,) in rejected_rows:
-            for reason in json.loads(reasons_json):
-                reason_counts[reason] = reason_counts.get(reason, 0) + 1
-
-        top_reasons = sorted(reason_counts.items(), key=lambda item: (-item[1], item[0]))[:5]
-
         return {
-            "latest_run_date": latest_run[0].isoformat(),
-            "latest_run_id": latest_run[1],
-            "runs_tracked": runs_tracked,
-            "accepted_count": latest_run[2],
-            "candidate_count": latest_run[3],
-            "rejected_count": latest_run[4],
-            "filtered_count": latest_run[5],
-            "accepted_delta": latest_run[2] - oldest_run[0],
-            "rejected_delta": latest_run[4] - oldest_run[1],
-            "quarantined_count": quarantined_count,
-            "top_reasons": top_reasons,
+            "latest_run_date": None,
+            "latest_run_id": None,
+            "runs_tracked": 0,
+            "accepted_count": 0,
+            "candidate_count": 0,
+            "rejected_count": 0,
+            "filtered_count": 0,
+            "accepted_delta": 0,
+            "rejected_delta": 0,
+            "quarantined_count": 0,
+            "top_reasons": [],
         }
 
-    # New v2 stats calculation
     run_date = latest_run[0]
     run_id = latest_run[1]
 
-    # Count runs tracked in v2
-    runs_tracked = connection.execute("SELECT COUNT(*) FROM runs_v2").fetchone()[0]
+    # Count runs tracked
+    runs_tracked = connection.execute("SELECT COUNT(*) FROM runs").fetchone()[0]
 
     # Get resolver counts for latest run
     status_counts = connection.execute(
@@ -968,7 +898,7 @@ def compute_latest_summary(connection) -> dict[str, Any]:
             SUM(CASE WHEN status = 'candidate' THEN 1 ELSE 0 END) as candidate,
             SUM(CASE WHEN status = 'rejected' THEN 1 ELSE 0 END) as rejected
         FROM resolver_run_status
-        WHERE run_id = (SELECT run_id FROM runs_v2
+        WHERE run_id = (SELECT run_id FROM runs
                       ORDER BY run_date DESC, run_started_at DESC LIMIT 1)
         """
     ).fetchone()
@@ -1010,7 +940,7 @@ def compute_latest_summary(connection) -> dict[str, Any]:
         "accepted_count": accepted_count,
         "candidate_count": candidate_count,
         "rejected_count": rejected_count,
-        "filtered_count": 0,  # Not tracked per-run in v2 yet
+        "filtered_count": 0,  # Not tracked per-run yet
         "accepted_delta": 0,  # Would need historical comparison
         "rejected_delta": 0,
         "quarantined_count": quarantined_count,
@@ -1145,179 +1075,3 @@ def get_resolver_stability_metrics(
         flapped_within_day_7d=flapped_within_day_7d,
         flapped_within_day_30d=flapped_within_day_30d,
     )
-
-
-def migrate_legacy_to_v2(connection, dry_run: bool = False) -> dict[str, int]:
-    """Migrate data from legacy tables to new v2 schema.
-
-    This is a one-time migration for existing history databases.
-    It backfills resolver_daily from dns_host_daily and runs_v2 from runs.
-
-    Args:
-        connection: DuckDB connection
-        dry_run: If True, only count what would be migrated without writing
-
-    Returns:
-        Dict with migration statistics
-    """
-    stats = {
-        "runs_migrated": 0,
-        "dns_hosts_migrated": 0,
-        "resolver_daily_created": 0,
-        "skipped": 0,
-    }
-
-    # Check if legacy data exists
-    legacy_runs = connection.execute("SELECT COUNT(*) FROM runs").fetchone()[0]
-
-    if legacy_runs == 0:
-        return stats  # Nothing to migrate
-
-    # Check if already migrated
-    v2_runs = connection.execute("SELECT COUNT(*) FROM runs_v2").fetchone()[0]
-
-    if v2_runs > 0 and not dry_run:
-        # Partial migration - mark as needing manual review
-        connection.execute(
-            """
-            INSERT OR REPLACE INTO schema_metadata (key, value, updated_at)
-            VALUES ('migration_status', 'partial', CURRENT_TIMESTAMP)
-            """
-        )
-
-    # Migrate runs to runs_v2
-    run_rows = connection.execute(
-        """
-        SELECT run_date, generated_at, github_run_id, repo_sha, crawler_sha
-        FROM runs
-        """
-    ).fetchall()
-
-    for row in run_rows:
-        run_date, generated_at, github_run_id, repo_sha, crawler_sha = row
-        run_id = f"{github_run_id}_{generated_at.isoformat()}"
-
-        if not dry_run:
-            connection.execute(
-                """
-                INSERT OR REPLACE INTO runs_v2
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?)
-                """,
-                [
-                    run_id,
-                    run_date,
-                    generated_at,
-                    generated_at,
-                    github_run_id,
-                    repo_sha,
-                    crawler_sha,
-                    "scheduled",  # Legacy runs assumed scheduled
-                ],
-            )
-        stats["runs_migrated"] += 1
-
-    # Migrate dns_host_daily to resolver_daily
-    # This creates synthetic resolver_keys for legacy DNS data
-    host_rows = connection.execute(
-        """
-        SELECT run_date, host, status, reasons_signature, reasons_json,
-               accepted_count, candidate_count, rejected_count,
-               udp_status, tcp_status
-        FROM dns_host_daily
-        """
-    ).fetchall()
-
-    for row in host_rows:
-        (
-            run_date,
-            host,
-            status,
-            reasons_signature,
-            reasons_json,
-            _accepted_count,  # Unused in migration
-            _candidate_count,  # Unused in migration
-            _rejected_count,  # Unused in migration
-            udp_status,
-            tcp_status,
-        ) = row
-
-        # Create synthetic resolver_keys for each transport
-        # We create one entry per transport to maintain history
-        transports_to_migrate = []
-
-        if udp_status is not None:
-            transports_to_migrate.append(("dns-udp", udp_status))
-        if tcp_status is not None:
-            transports_to_migrate.append(("dns-tcp", tcp_status))
-
-        # If neither transport has status, skip (shouldn't happen)
-        if not transports_to_migrate:
-            stats["skipped"] += 1
-            continue
-
-        for transport, transport_status in transports_to_migrate:
-            resolver_key = f"{transport}|{host}|53"
-
-            if not dry_run:
-                connection.execute(
-                    """
-                    INSERT OR REPLACE INTO resolver_daily
-                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-                    """,
-                    [
-                        run_date,
-                        resolver_key,
-                        host,
-                        transport,
-                        transport_status or status,
-                        reasons_signature,
-                        reasons_json,
-                        1,  # runs_that_day (assumed 1 per day in legacy)
-                        1 if transport_status == "accepted" else 0,
-                        1 if transport_status == "rejected" else 0,
-                        False,  # flapped_within_day (unknown in legacy)
-                        None,  # p50_latency_ms
-                        None,  # p95_latency_ms
-                        None,  # jitter_ms
-                    ],
-                )
-            stats["resolver_daily_created"] += 1
-
-        stats["dns_hosts_migrated"] += 1
-
-    if not dry_run:
-        # Record migration completion
-        connection.execute(
-            """
-            INSERT OR REPLACE INTO schema_metadata (key, value, updated_at)
-            VALUES ('migration_status', 'completed', CURRENT_TIMESTAMP)
-            """
-        )
-
-    return stats
-
-
-def ensure_history_schema_with_migration(connection) -> bool:
-    """Ensure schema is up to date, running migration if needed.
-
-    Returns True if schema is ready, False if migration failed.
-    """
-    # Check version BEFORE ensure_history_schema writes schema_version=2.
-    # On a legacy database schema_metadata does not yet exist, so
-    # _check_schema_version() returns 0 — indicating migration is needed.
-    pre_version = _check_schema_version(connection)
-
-    # Create all tables (including schema_metadata with schema_version=2)
-    ensure_history_schema(connection)
-
-    if pre_version >= HISTORY_SCHEMA_VERSION:
-        return True  # Already up to date — nothing to migrate
-
-    # pre_version was 0 (legacy DB or fresh DB); attempt migration.
-    # migrate_legacy_to_v2 is a no-op when legacy tables are empty (fresh DB).
-    try:
-        migrate_legacy_to_v2(connection)
-        return True
-    except Exception:
-        # Migration failed — schema will still work with legacy tables
-        return False

@@ -6,14 +6,16 @@ from datetime import UTC, date, datetime, timedelta
 
 from resolver_inventory.history import (
     DNS_QUARANTINE_DAYS,
+    HISTORY_SCHEMA_VERSION,
     apply_dns_quarantine,
     connect_history_db,
     derive_dns_host_outcomes,
+    ensure_history_schema,
     get_resolver_stability_metrics,
-    migrate_legacy_to_v2,
     normalize_reasons_signature,
     normalize_resolver_key,
     parse_resolver_key,
+    prune_history,
     update_history,
 )
 from resolver_inventory.models import Candidate, ProbeResult, ValidationResult
@@ -358,13 +360,34 @@ class TestResolverKeyNormalization:
             provider=None,
             source="test",
             transport="doh",
-            endpoint_url="https://DNS.Example.COM/dns-query",
+            endpoint_url="HTTPS://DNS.Example.COM/DNS-Query?name=Example.COM",
             host="DNS.Example.COM",
+            port=443,
+            path="/DNS-Query",
+        )
+        key = normalize_resolver_key(candidate)
+        assert key == "doh|https://dns.example.com/DNS-Query?name=Example.COM"
+
+    def test_normalize_doh_key_keeps_distinct_paths(self) -> None:
+        a = Candidate(
+            provider=None,
+            source="test",
+            transport="doh",
+            endpoint_url="https://dns.example.com/dns-query",
+            host="dns.example.com",
             port=443,
             path="/dns-query",
         )
-        key = normalize_resolver_key(candidate)
-        assert key == "doh|https://dns.example.com/dns-query"
+        b = Candidate(
+            provider=None,
+            source="test",
+            transport="doh",
+            endpoint_url="https://dns.example.com/DNS-Query",
+            host="dns.example.com",
+            port=443,
+            path="/DNS-Query",
+        )
+        assert normalize_resolver_key(a) != normalize_resolver_key(b)
 
     def test_parse_dns_key(self) -> None:
         transport, host, port = parse_resolver_key("dns-udp|1.1.1.1|53")
@@ -547,9 +570,9 @@ class TestDailyRollupAggregation:
                 [],
             )
 
-            # Check runs_v2 has one entry
+            # Check runs has one entry
             run_count = connection.execute(
-                "SELECT COUNT(*) FROM runs_v2 WHERE run_date = ?",
+                "SELECT COUNT(*) FROM runs WHERE run_date = ?",
                 [day],
             ).fetchone()[0]
             assert run_count == 1
@@ -582,9 +605,42 @@ class TestDailyRollupAggregation:
             status = connection.execute("SELECT day_status FROM resolver_daily").fetchone()[0]
             assert status == "rejected"
 
+    def test_day_status_rejected_when_severe_reason_present(self, tmp_path) -> None:
+        db_path = tmp_path / "history.duckdb"
+        with connect_history_db(db_path) as connection:
+            day = date(2026, 1, 1)
+            first = _metadata(day)
+            first.github_run_id = "run-a"
+            second = _metadata(day)
+            second.github_run_id = "run-b"
+            update_history(
+                connection,
+                first,
+                [_dns_result("1.1.1.1", "dns-udp", "accepted")],
+                [],
+            )
+            update_history(
+                connection,
+                second,
+                [_dns_result("1.1.1.1", "dns-udp", "rejected", ["answer_mismatch"])],
+                [],
+            )
+
+            status = connection.execute(
+                "SELECT day_status FROM resolver_daily WHERE resolver_key = 'dns-udp|1.1.1.1|53'"
+            ).fetchone()[0]
+            assert status == "rejected"
+
 
 class TestHistoryCapsAndStreaks:
     """Tests for history-based score caps and streak calculation."""
+
+    def test_no_history_entry_returns_none(self, tmp_path) -> None:
+        db_path = tmp_path / "history.duckdb"
+        resolver_key = "dns-udp|1.1.1.1|53"
+        with connect_history_db(db_path) as connection:
+            metrics = get_resolver_stability_metrics(connection, resolver_key, date(2026, 1, 5))
+            assert metrics is None
 
     def test_consecutive_success_days_counting(self, tmp_path) -> None:
         db_path = tmp_path / "history.duckdb"
@@ -676,80 +732,65 @@ class TestHistoryCapsAndStreaks:
             assert metrics.status_flaps_30d == 2
 
 
-class TestMigration:
-    """Tests for schema migration from legacy to v2."""
-
-    def test_migrate_legacy_dns_data(self, tmp_path) -> None:
+class TestSchemaManagement:
+    def test_creates_only_current_history_tables(self, tmp_path) -> None:
         db_path = tmp_path / "history.duckdb"
-
         with connect_history_db(db_path) as connection:
-            # Insert legacy data
-            connection.execute(
-                """INSERT INTO runs VALUES
-                (?, ?, ?, ?, ?)""",
-                [date(2026, 1, 1), datetime(2026, 1, 1, 0, 0, 0), "run-1", "sha-1", "crawler-1"],
-            )
-            connection.execute(
-                """INSERT INTO dns_host_daily VALUES
-                (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
-                [
-                    date(2026, 1, 1),
-                    "1.1.1.1",
-                    "accepted",
-                    "",
-                    "[]",
-                    1,
-                    0,
-                    0,
-                    "accepted",
-                    "accepted",
-                ],
+            tables = {
+                row[0]
+                for row in connection.execute(
+                    """
+                    SELECT table_name
+                    FROM information_schema.tables
+                    WHERE table_schema = current_schema()
+                    """
+                ).fetchall()
+            }
+            assert "runs" in tables
+            assert "run_stats" not in tables
+            assert "dns_host_daily" not in tables
+            assert {"schema_metadata", "runs", "resolver_run_status", "resolver_daily"}.issubset(
+                tables
             )
 
-            # Run migration
-            stats = migrate_legacy_to_v2(connection, dry_run=False)
-
-            assert stats["runs_migrated"] == 1
-            assert stats["dns_hosts_migrated"] == 1
-            assert stats["resolver_daily_created"] == 2  # UDP + TCP
-
-            # Verify v2 tables populated
-            v2_count = connection.execute("SELECT COUNT(*) FROM resolver_daily").fetchone()[0]
-            assert v2_count == 2
-
-    def test_dry_run_does_not_write(self, tmp_path) -> None:
+    def test_rebuilds_incompatible_schema(self, tmp_path) -> None:
         db_path = tmp_path / "history.duckdb"
-
         with connect_history_db(db_path) as connection:
-            # Insert legacy data
+            connection.execute("CREATE TABLE run_stats (run_date DATE)")
             connection.execute(
-                """INSERT INTO runs VALUES
-                (?, ?, ?, ?, ?)""",
-                [date(2026, 1, 1), datetime(2026, 1, 1, 0, 0, 0), "run-1", "sha-1", "crawler-1"],
+                """
+                INSERT OR REPLACE INTO schema_metadata (key, value, updated_at)
+                VALUES ('schema_version', '1', CURRENT_TIMESTAMP)
+                """
             )
-            connection.execute(
-                """INSERT INTO dns_host_daily VALUES
-                (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
-                [
-                    date(2026, 1, 1),
-                    "1.1.1.1",
-                    "accepted",
-                    "",
-                    "[]",
-                    1,
-                    0,
-                    0,
-                    "accepted",
-                    "accepted",
-                ],
+            ensure_history_schema(connection)
+            tables = {
+                row[0]
+                for row in connection.execute(
+                    """
+                    SELECT table_name
+                    FROM information_schema.tables
+                    WHERE table_schema = current_schema()
+                    """
+                ).fetchall()
+            }
+            assert "run_stats" not in tables
+            version = connection.execute(
+                "SELECT value FROM schema_metadata WHERE key = 'schema_version'"
+            ).fetchone()[0]
+            assert int(version) == HISTORY_SCHEMA_VERSION
+
+    def test_prune_history_touches_current_tables(self, tmp_path) -> None:
+        db_path = tmp_path / "history.duckdb"
+        with connect_history_db(db_path) as connection:
+            old_day = date(2026, 1, 1)
+            update_history(
+                connection,
+                _metadata(old_day),
+                [_dns_result("1.1.1.1", "dns-udp", "accepted")],
+                [],
             )
-
-            # Run dry-run migration
-            stats = migrate_legacy_to_v2(connection, dry_run=True)
-
-            assert stats["runs_migrated"] == 1
-            assert stats["resolver_daily_created"] == 2
-
-            # Verify v2 tables NOT populated
-            v2_count = connection.execute("SELECT COUNT(*) FROM resolver_daily").fetchone()[0]
-            assert v2_count == 0
+            prune_history(connection, run_date=date(2026, 3, 1))
+            assert connection.execute("SELECT COUNT(*) FROM runs").fetchone()[0] == 0
+            assert connection.execute("SELECT COUNT(*) FROM resolver_run_status").fetchone()[0] == 0
+            assert connection.execute("SELECT COUNT(*) FROM resolver_daily").fetchone()[0] == 0

@@ -7,6 +7,7 @@ from datetime import date
 from typing import TYPE_CHECKING
 
 from resolver_inventory.history import (
+    SEVERE_CORRECTNESS_REASONS,
     ResolverStabilityMetrics,
     get_resolver_stability_metrics,
     normalize_resolver_key,
@@ -35,12 +36,7 @@ _SEVERITY_PENALTIES: dict[str, int] = {
 
 # Hard-fail reasons that cap the final score regardless of other factors
 _HARD_FAIL_REASONS: frozenset[str] = frozenset(
-    {
-        "nxdomain_spoofing",
-        "tls_name_mismatch",
-        "answer_mismatch",
-        "unexpected_rcode_suspicious",
-    }
+    set(SEVERE_CORRECTNESS_REASONS).union({"unexpected_rcode_suspicious"})
 )
 
 # --- Configuration: Latency penalty tiers ---
@@ -343,10 +339,9 @@ def _score_history(
     Rewards sustained stability, penalizes flapping and recent failures.
     """
     if metrics is None:
-        components.derived_metrics["runs_seen_30d"] = 0
-        components.derived_metrics["runs_seen_7d"] = 0
-        components.derived_metrics["flaps_30d"] = 0
-        reasons.append("no_history")
+        components.derived_metrics["runs_seen_30d"] = None
+        components.derived_metrics["runs_seen_7d"] = None
+        components.derived_metrics["flaps_30d"] = None
         return 0
 
     # Record derived metrics
@@ -518,9 +513,7 @@ def _apply_history_caps(
 ) -> int:
     """Apply caps based on observation history."""
     if metrics is None:
-        # No history: cap at 90
-        components.caps_applied.append("insufficient_history")
-        return min(current_score, 90)
+        return current_score
 
     runs_seen = metrics.runs_seen_30d
 
@@ -550,10 +543,9 @@ def _apply_perfect_score_requirements(
         components.caps_applied.append("performance_not_perfect")
         return 99
 
-    # Check history requirements
+    # Check history requirements only when history exists.
     if metrics is None:
-        components.caps_applied.append("insufficient_history_for_100")
-        return 99
+        return 100
 
     if metrics.runs_seen_30d < _MIN_RUNS_FOR_PERFECT_SCORE:
         components.caps_applied.append(f"insufficient_history_for_100:{metrics.runs_seen_30d}_runs")
@@ -644,30 +636,28 @@ def score(
     # Apply history-based caps
     final_score = _apply_history_caps(metrics, final_score, components)
 
-    # Check for hard-fail correctness issues
-    has_hard_fail = _has_hard_fail(reasons)
+    # Apply perfect score requirements (100 -> 99 if not meeting criteria)
+    if final_score >= 100:
+        final_score = _apply_perfect_score_requirements(probes, metrics, components, reasons)
 
-    # Determine acceptance status
+    # Check for hard-fail correctness issues and apply final clamp before status.
+    has_hard_fail = _has_hard_fail(reasons)
+    if has_hard_fail and final_score > 59:
+        final_score = 59
+        components.caps_applied.append("hard_fail_cap")
+
+    # Determine acceptance status from the final clamped score.
     accept_min = settings.scoring.accept_min_score
     candidate_min = settings.scoring.candidate_min_score
-
-    if final_score >= accept_min and not has_hard_fail:
+    if not has_hard_fail and final_score >= accept_min:
         status = "accepted"
         accepted = True
-    elif final_score >= candidate_min and not has_hard_fail:
+    elif not has_hard_fail and final_score >= candidate_min:
         status = "candidate"
         accepted = False
     else:
         status = "rejected"
         accepted = False
-        # If hard-fail issue, cap at 59
-        if has_hard_fail and final_score > 59:
-            final_score = 59
-            components.caps_applied.append("hard_fail_cap")
-
-    # Apply perfect score requirements (100 -> 99 if not meeting criteria)
-    if final_score >= 100:
-        final_score = _apply_perfect_score_requirements(probes, metrics, components, reasons)
 
     # Flag UDP-only transport (dns-udp candidates are never cross-tested with TCP)
     if candidate.transport == "dns-udp" and "udp_only" not in reasons:

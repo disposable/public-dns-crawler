@@ -2,9 +2,10 @@
 
 from __future__ import annotations
 
-from urllib.parse import urlparse, urlunparse
+from urllib.parse import urlparse
 
 from resolver_inventory.models import Candidate, FilteredCandidate
+from resolver_inventory.util.url import canonicalize_doh_url
 
 
 def normalize_doh_candidates(
@@ -68,23 +69,4 @@ def normalize_doh_candidates(
 
 def _normalize_url(raw: str) -> str:
     """Normalize a DoH URL to a canonical form."""
-    raw = raw.strip()
-    if not raw.startswith("https://"):
-        return ""
-    try:
-        p = urlparse(raw)
-        if not p.hostname:
-            return ""
-        normalized = urlunparse(
-            (
-                p.scheme,
-                p.netloc.lower(),
-                p.path or "/dns-query",
-                "",
-                "",
-                "",
-            )
-        )
-        return normalized
-    except Exception:
-        return ""
+    return canonicalize_doh_url(raw)

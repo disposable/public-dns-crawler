@@ -469,9 +469,9 @@ The crawler maintains historical data in `meta/history.duckdb` using DuckDB. The
 
 ### Schema Overview
 
-The history database uses a v2 schema with three main tables:
+The history database uses the current schema with these tables:
 
-**runs_v2** - Run-level metadata with unique `run_id` supporting multiple runs per day:
+**runs** - Run-level metadata with unique `run_id` supporting multiple runs per day:
 - `run_id`, `run_date`, `run_started_at`, `generated_at`
 - `github_run_id`, `repo_sha`, `crawler_sha`, `run_type`
 
@@ -488,6 +488,10 @@ The history database uses a v2 schema with three main tables:
 - `flapped_within_day`
 - `p50_latency_ms`, `p95_latency_ms`, `jitter_ms`
 
+**dns_host_quarantine** - Host-level DNS quarantine state derived from `resolver_daily`:
+- `host`, `first_quarantined_on`, `last_quarantined_on`, `retry_after`
+- `reasons_signature`, `reasons_json`, `cycles`
+
 ### Resolver Identity (resolver_key)
 
 History is tracked per-endpoint using a canonical `resolver_key`:
@@ -501,17 +505,17 @@ This allows:
 - Different DoH endpoints on same host to be tracked separately
 - Accurate per-endpoint scoring and caps
 
-### Migration
+### History Availability
 
-Existing history databases are automatically migrated from the legacy schema (v1) to v2 on first connection. The migration:
-1. Creates new v2 tables alongside legacy tables
-2. Backfills `resolver_daily` from legacy `dns_host_daily` data
-3. Records migration status in `schema_metadata` table
+Scoring distinguishes between:
+- **No history rows for a resolver**: history analysis is skipped (no history score/caps/reasons).
+- **Sparse existing history**: history-based caps and stability logic can still apply.
+- **Meaningful history**: full history scoring behavior applies.
 
 ### Intra-day Run Support
 
 The schema supports multiple validation runs per day:
-- Multiple entries in `runs_v2` with same `run_date` but different `run_id`
+- Multiple entries in `runs` with same `run_date` but different `run_id`
 - Multiple entries in `resolver_run_status` per run
 - `resolver_daily` aggregates all runs for a day into one row
 - History counting uses distinct days, not raw run counts
