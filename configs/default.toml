@@ -24,7 +24,9 @@ require_tcp_for_dns = false
 require_tls_valid_for_doh = true
 
 [validation.corpus]
-mode = "fallback"
+mode = "external"
+path = "../probe-corpus/probe-corpus.json"
+allow_builtin_fallback = true
 
 [scoring]
 accept_min_score = 80

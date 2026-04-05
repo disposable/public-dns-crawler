@@ -1,11 +1,15 @@
 {
   "snapshot_version": 1,
-  "generated_at": "2026-04-04T00:00:00Z",
+  "generated_at": "2026-04-05T00:00:00Z",
   "sources_used": [
     "https://www.iana.org/domains/root/servers",
     "https://www.iana.org/domains/root/db/de.html",
     "https://www.iana.org/domains/root/db/uk.html",
-    "https://www.iana.org/domains/root/db/jp.html"
+    "https://www.iana.org/domains/root/db/jp.html",
+    "https://www.iana.org/domains/root/db/fr.html",
+    "https://www.iana.org/domains/root/db/nl.html",
+    "https://www.iana.org/domains/root/db/br.html",
+    "https://www.iana.org/domains/root/db/au.html"
   ],
   "root_servers": [
     {
@@ -30,11 +34,74 @@
       "operator_family": "cogent"
     },
     {
+      "hostname": "d.root-servers.net.",
+      "ipv4": ["199.7.91.13"],
+      "ipv6": ["2001:500:2d::d"],
+      "source": "iana-root-servers",
+      "operator_family": "umaryland"
+    },
+    {
+      "hostname": "e.root-servers.net.",
+      "ipv4": ["192.203.230.10"],
+      "ipv6": ["2001:500:a8::e"],
+      "source": "iana-root-servers",
+      "operator_family": "nasa"
+    },
+    {
+      "hostname": "f.root-servers.net.",
+      "ipv4": ["192.5.5.241"],
+      "ipv6": ["2001:500:2f::f"],
+      "source": "iana-root-servers",
+      "operator_family": "isc"
+    },
+    {
+      "hostname": "g.root-servers.net.",
+      "ipv4": ["192.112.36.4"],
+      "ipv6": ["2001:500:12::d0d"],
+      "source": "iana-root-servers",
+      "operator_family": "dod"
+    },
+    {
+      "hostname": "h.root-servers.net.",
+      "ipv4": ["198.97.190.53"],
+      "ipv6": ["2001:500:1::53"],
+      "source": "iana-root-servers",
+      "operator_family": "arl"
+    },
+    {
+      "hostname": "i.root-servers.net.",
+      "ipv4": ["192.36.148.17"],
+      "ipv6": ["2001:7fe::53"],
+      "source": "iana-root-servers",
+      "operator_family": "netnod"
+    },
+    {
+      "hostname": "j.root-servers.net.",
+      "ipv4": ["192.58.128.30"],
+      "ipv6": ["2001:503:c27::2:30"],
+      "source": "iana-root-servers",
+      "operator_family": "verisign"
+    },
+    {
+      "hostname": "k.root-servers.net.",
+      "ipv4": ["193.0.14.129"],
+      "ipv6": ["2001:7fd::1"],
+      "source": "iana-root-servers",
+      "operator_family": "ripe-ncc"
+    },
+    {
       "hostname": "l.root-servers.net.",
       "ipv4": ["199.7.83.42"],
       "ipv6": ["2001:500:9f::42"],
       "source": "iana-root-servers",
       "operator_family": "icann"
+    },
+    {
+      "hostname": "m.root-servers.net.",
+      "ipv4": ["202.12.27.33"],
+      "ipv6": ["2001:dc3::35"],
+      "source": "iana-root-servers",
+      "operator_family": "wide"
     }
   ],
   "delegations": [
@@ -121,6 +188,30 @@
           "operator_family": "jprs"
         }
       ]
+    },
+    {
+      "zone": "fr.",
+      "nameservers": ["d.nic.fr.", "e.ext.nic.fr.", "f.ext.nic.fr.", "g.ext.nic.fr."],
+      "source": "iana-root-db-fr",
+      "exact_hosts": []
+    },
+    {
+      "zone": "nl.",
+      "nameservers": ["ns1.dns.nl.", "ns2.dns.nl.", "ns3.dns.nl.", "ns4.dns.nl.", "ns5.dns.nl."],
+      "source": "iana-root-db-nl",
+      "exact_hosts": []
+    },
+    {
+      "zone": "br.",
+      "nameservers": ["a.dns.br.", "b.dns.br.", "c.dns.br.", "d.dns.br.", "e.dns.br."],
+      "source": "iana-root-db-br",
+      "exact_hosts": []
+    },
+    {
+      "zone": "au.",
+      "nameservers": ["a.au.", "b.au.", "c.au.", "d.au.", "e.au.", "f.au."],
+      "source": "iana-root-db-au",
+      "exact_hosts": []
     }
   ]
 }

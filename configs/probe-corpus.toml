@@ -7,13 +7,13 @@ seed_path = "configs/probe-corpus-seeds.json"
 resolvers = ["1.1.1.1", "9.9.9.9", "8.8.8.8"]
 
 [probe_corpus.negative]
-parent_zones = ["com.", "net.", "de.", "jp."]
+parent_zones = ["com.", "net.", "de.", "jp.", "org.", "uk.", "fr."]
 label_length = 40
 validation_rounds = 3
 
 [probe_corpus.selection]
-max_per_operator_family = 3
-max_per_tld = 3
+max_per_operator_family = 4
+max_per_tld = 30
 
 [probe_corpus.validation.exact]
 rounds = 2
