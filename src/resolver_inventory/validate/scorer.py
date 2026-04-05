@@ -23,18 +23,18 @@ _REASON_WEIGHTS: dict[str, int] = {
 # Thresholds in ms → penalty points deducted from raw_score.
 _LATENCY_TIERS: list[tuple[int, int]] = [
     (1500, 30),  # > 1500 ms: severe
-    (700, 18),   # 700–1500 ms: high
-    (300, 8),    # 300–700 ms: moderate
-    (100, 3),    # 100–300 ms: slight
+    (700, 18),  # 700-1500 ms: high
+    (300, 8),  # 300-700 ms: moderate
+    (100, 3),  # 100-300 ms: slight
 ]
 
 # Reliability penalty tiers (from upstream source metadata, e.g. public-dns.info).
 # Thresholds are fractions [0.0, 1.0] → penalty points.
 _RELIABILITY_TIERS: list[tuple[float, int]] = [
     (0.55, 30),  # < 0.55 → very unreliable
-    (0.70, 20),  # 0.55–0.70
-    (0.85, 10),  # 0.70–0.85
-    (0.95, 3),   # 0.85–0.95
+    (0.70, 20),  # 0.55-0.70
+    (0.85, 10),  # 0.70-0.85
+    (0.95, 3),  # 0.85-0.95
 ]
 
 
@@ -107,9 +107,7 @@ def score(
         sorted_l = sorted(latencies)
         mid = len(sorted_l) // 2
         median_latency = (
-            (sorted_l[mid - 1] + sorted_l[mid]) / 2.0
-            if len(sorted_l) % 2 == 0
-            else sorted_l[mid]
+            (sorted_l[mid - 1] + sorted_l[mid]) / 2.0 if len(sorted_l) % 2 == 0 else sorted_l[mid]
         )
         for threshold_ms, pts in _LATENCY_TIERS:
             if median_latency > threshold_ms:
