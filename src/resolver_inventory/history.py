@@ -10,7 +10,13 @@ from typing import Any
 
 import duckdb
 
-from resolver_inventory.models import Candidate, DnsHostOutcome, FilteredCandidate, ValidationResult
+from resolver_inventory.models import (
+    Candidate,
+    DnsHostOutcome,
+    FilteredCandidate,
+    Status,
+    ValidationResult,
+)
 
 HISTORY_RETENTION_DAYS = 30
 DNS_QUARANTINE_STREAK_DAYS = 14
@@ -35,6 +41,26 @@ class QuarantineRecord:
     reasons_signature: str
     reasons_json: str
     cycles: int
+
+
+@dataclass(slots=True)
+class ResolverStabilityMetrics:
+    """Per-resolver stability metrics computed from historical data."""
+
+    host: str
+    transport: str
+    runs_seen_7d: int
+    runs_seen_30d: int
+    success_days_7d: int
+    success_days_30d: int
+    consecutive_success_days: int
+    consecutive_fail_days: int
+    status_flaps_30d: int
+    latest_status: str | None = None
+
+    def has_minimum_history(self, min_runs: int = 14) -> bool:
+        """Check if resolver has enough historical observations."""
+        return self.runs_seen_30d >= min_runs
 
 
 def normalize_reasons_signature(reasons: list[str]) -> str:
@@ -86,7 +112,7 @@ def derive_dns_host_outcomes(results: list[ValidationResult]) -> list[DnsHostOut
 def _transport_status(
     results: list[ValidationResult],
     transport: str,
-):
+) -> Status | None:
     for result in results:
         if result.candidate.transport == transport:
             return result.status
@@ -474,3 +500,106 @@ def compute_latest_summary(connection) -> dict[str, Any]:
         "quarantined_count": quarantined_count,
         "top_reasons": top_reasons,
     }
+
+
+def get_resolver_stability_metrics(
+    connection,
+    host: str,
+    transport: str,
+    run_date: date,
+) -> ResolverStabilityMetrics | None:
+    """Compute stability metrics for a resolver from historical data.
+
+    Returns None if no history exists for this resolver.
+    Note: dns_host_daily is keyed by host only, so transport is stored on the
+    result for labeling but does not filter the underlying queries.
+    """
+    cutoff_7d = run_date - timedelta(days=7)
+    cutoff_30d = run_date - timedelta(days=30)
+
+    # Get 7-day stats
+    row_7d = connection.execute(
+        """
+        SELECT COUNT(*), SUM(CASE WHEN status = 'accepted' THEN 1 ELSE 0 END)
+        FROM dns_host_daily
+        WHERE host = ? AND run_date > ? AND run_date <= ?
+        """,
+        [host, cutoff_7d, run_date],
+    ).fetchone()
+
+    # Get 30-day stats
+    row_30d = connection.execute(
+        """
+        SELECT COUNT(*), SUM(CASE WHEN status = 'accepted' THEN 1 ELSE 0 END)
+        FROM dns_host_daily
+        WHERE host = ? AND run_date > ? AND run_date <= ?
+        """,
+        [host, cutoff_30d, run_date],
+    ).fetchone()
+
+    if row_30d is None or row_30d[0] == 0:
+        # No history at all
+        return None
+
+    runs_seen_7d = row_7d[0] if row_7d else 0
+    success_days_7d = row_7d[1] if row_7d and row_7d[1] else 0
+    runs_seen_30d = row_30d[0]
+    success_days_30d = row_30d[1] if row_30d[1] else 0
+
+    # Get consecutive success/fail streaks by scanning from most recent
+    consecutive_rows = connection.execute(
+        """
+        SELECT run_date, status
+        FROM dns_host_daily
+        WHERE host = ? AND run_date <= ?
+        ORDER BY run_date DESC
+        """,
+        [host, run_date],
+    ).fetchall()
+
+    consecutive_success_days = 0
+    consecutive_fail_days = 0
+    latest_status = None
+
+    for i, (row_date, status) in enumerate(consecutive_rows):
+        if i == 0:
+            latest_status = status
+        expected_date = run_date - timedelta(days=i)
+        if row_date != expected_date:
+            # Gap in history, stop counting
+            break
+        if status == "accepted":
+            if consecutive_fail_days == 0:
+                consecutive_success_days += 1
+            else:
+                break
+        elif status == "rejected":
+            if consecutive_success_days == 0:
+                consecutive_fail_days += 1
+            else:
+                break
+        else:  # candidate - neutral, break the streak
+            break
+
+    # Count status flaps in last 30 days
+    status_flaps = 0
+    prev_status = None
+    for _, status in consecutive_rows[:30]:
+        if prev_status is not None:
+            # Count transitions between accepted/candidate/rejected
+            if status != prev_status:
+                status_flaps += 1
+        prev_status = status
+
+    return ResolverStabilityMetrics(
+        host=host,
+        transport=transport,
+        runs_seen_7d=runs_seen_7d,
+        runs_seen_30d=runs_seen_30d,
+        success_days_7d=success_days_7d,
+        success_days_30d=success_days_30d,
+        consecutive_success_days=consecutive_success_days,
+        consecutive_fail_days=consecutive_fail_days,
+        status_flaps_30d=status_flaps,
+        latest_status=latest_status,
+    )

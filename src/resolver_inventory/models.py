@@ -79,6 +79,16 @@ class ValidationResult:
     status: Status
     reasons: list[str]
     probes: list[ProbeResult]
+    # Component scores (0-100 scale after weighting)
+    correctness_score: int = 0
+    availability_score: int = 0
+    performance_score: int = 0
+    history_score: int = 0
+    confidence_score: int = 0
+    # Detailed scoring info
+    score_breakdown: dict[str, int] = field(default_factory=dict)
+    score_caps_applied: list[str] = field(default_factory=list)
+    derived_metrics: dict[str, float | int | None] = field(default_factory=dict)
 
     def median_latency_ms(self) -> float | None:
         """Return median latency across successful probes, or None."""
@@ -90,6 +100,23 @@ class ValidationResult:
         if len(latencies) % 2 == 0:
             return (latencies[mid - 1] + latencies[mid]) / 2.0
         return latencies[mid]
+
+    def p95_latency_ms(self) -> float | None:
+        """Return 95th percentile latency across successful probes, or None."""
+        latencies = [p.latency_ms for p in self.probes if p.ok and p.latency_ms is not None]
+        if not latencies:
+            return None
+        latencies.sort()
+        idx = int(len(latencies) * 0.95)
+        return latencies[min(idx, len(latencies) - 1)]
+
+    def jitter_ms(self) -> float | None:
+        """Return jitter (p95 - p50) across successful probes, or None."""
+        p50 = self.median_latency_ms()
+        p95 = self.p95_latency_ms()
+        if p50 is None or p95 is None:
+            return None
+        return max(0.0, p95 - p50)
 
 
 @dataclass(slots=True)

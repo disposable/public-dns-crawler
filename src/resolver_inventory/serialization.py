@@ -80,7 +80,19 @@ def validation_result_to_dict_export(
         "reasons": result.reasons,
         "candidate": candidate_to_dict(result.candidate),
         "median_latency_ms": result.median_latency_ms(),
+        # Detailed scoring fields
+        "score_breakdown": result.score_breakdown
+        or {
+            "correctness": result.correctness_score,
+            "availability": result.availability_score,
+            "performance": result.performance_score,
+            "history": result.history_score,
+        },
+        "confidence_score": result.confidence_score,
+        "score_caps_applied": result.score_caps_applied,
+        "derived_metrics": result.derived_metrics,
     }
+
     if rejected_failed_only and result.status == "rejected":
         failed_probes = [_probe_result_to_dict(probe) for probe in result.probes if not probe.ok]
         all_failed = bool(result.probes) and len(failed_probes) == len(result.probes)
@@ -103,6 +115,7 @@ def validation_result_from_dict(data: dict[str, Any]) -> ValidationResult:
         )
         for probe in data.get("probes", [])
     ]
+    breakdown = data.get("score_breakdown", {})
     return ValidationResult(
         candidate=candidate_from_dict(data["candidate"]),
         accepted=data["accepted"],
@@ -110,6 +123,14 @@ def validation_result_from_dict(data: dict[str, Any]) -> ValidationResult:
         status=data["status"],
         reasons=data["reasons"],
         probes=probes,
+        correctness_score=breakdown.get("correctness", data.get("correctness_score", 0)),
+        availability_score=breakdown.get("availability", data.get("availability_score", 0)),
+        performance_score=breakdown.get("performance", data.get("performance_score", 0)),
+        history_score=breakdown.get("history", data.get("history_score", 0)),
+        confidence_score=data.get("confidence_score", 0),
+        score_breakdown=breakdown,
+        score_caps_applied=data.get("score_caps_applied", []),
+        derived_metrics=data.get("derived_metrics", {}),
     )
 
 

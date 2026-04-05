@@ -266,6 +266,106 @@ fresh query name at execution time.
 | `unexpected_rcode` | Resolver returned an unexpected RCODE |
 | `udp_only` | Only UDP probes ran (no TCP confirmation) |
 
+## Scoring System
+
+The validation result includes a composite `score` (0-100) that reflects resolver quality, as well as a separate `confidence_score` (0-100) that reflects how certain we are about the measurement.
+
+### Score Components
+
+The final score is a weighted sum of four components:
+
+| Component | Weight | Description |
+|-----------|--------|-------------|
+| `correctness` | 0-50 | Penalties for DNS/TLS errors, answer mismatches, NXDOMAIN spoofing |
+| `availability` | 0-20 | Based on probe success rate (100% = 20 pts, 50% = 10 pts) |
+| `performance` | 0-20 | Latency penalties for p50, p95, and jitter thresholds |
+| `history` | 0-10 | Rewards sustained stability, penalizes flapping and recent failures |
+
+Component scores are included in the JSON export as `score_breakdown`.
+
+### Performance Penalty Thresholds
+
+**p50 (median) latency:**
+- >100 ms: -3 points
+- >300 ms: -8 points
+- >700 ms: -18 points
+- >1500 ms: -30 points
+
+**p95 (tail) latency:**
+- >400 ms: -2 points
+- >800 ms: -6 points
+- >1500 ms: -12 points
+- >2500 ms: -20 points
+
+**Jitter (p95 - p50):**
+- >150 ms: -2 points
+- >400 ms: -6 points
+- >900 ms: -12 points
+
+Reason codes: `latency_high`, `latency_very_high`, `latency_p95_high`, `latency_jitter_high`
+
+### Hard-Fail Correctness Issues
+
+Severe correctness problems cap the final score at ≤59 regardless of other factors:
+- `nxdomain_spoofing`
+- `tls_name_mismatch`
+- `answer_mismatch`
+- `unexpected_rcode_suspicious` (REFUSED/SERVFAIL patterns)
+
+### History-Based Caps
+
+Without sufficient observation history, scores are capped:
+- <3 runs observed: max 90
+- 3-6 runs observed: max 95
+- 7-13 runs observed: max 98
+- 14+ runs: no cap from history
+
+### Score of 100 Requirements
+
+A perfect score of 100 requires ALL of the following:
+- No correctness issues (no penalties)
+- No performance penalties (low latency)
+- 100% probe success rate
+- ≥14 observed runs in history
+- ≤2 status flaps in 30 days
+- No consecutive failure days
+- Confidence score ≥90
+
+### Confidence Score
+
+The `confidence_score` (0-100) is computed separately and reflects measurement certainty, not resolver quality:
+- Probe count (max 30): more probes = higher confidence
+- Latency samples (max 20): more samples = higher confidence
+- Historical observations (max 35): more runs = higher confidence
+- Source metadata (max 15): reliability data present = higher confidence
+
+Missing source reliability reduces confidence but does not penalize the quality score.
+
+### Exported Score Fields
+
+JSON exports include these new fields:
+
+```json
+{
+  "score": 87,
+  "score_breakdown": {
+    "correctness": 50,
+    "availability": 18,
+    "performance": 12,
+    "history": 7
+  },
+  "confidence_score": 65,
+  "score_caps_applied": ["insufficient_history"],
+  "derived_metrics": {
+    "p50_latency_ms": 45.2,
+    "p95_latency_ms": 120.5,
+    "jitter_ms": 75.3,
+    "runs_seen_30d": 5,
+    "flaps_30d": 0
+  }
+}
+```
+
 ## Development
 
 ```bash
