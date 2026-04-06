@@ -45,8 +45,16 @@ def main() -> int:
         filtered_candidate_from_dict(record) for record in load_json_list(args.filtered_input)
     ]
 
+    print(
+        "update_history: "
+        f"results={len(results)} filtered={len(filtered)} history_db={args.history_db}",
+        flush=True,
+    )
+
     with connect_history_db(args.history_db) as connection:
         update_history(connection, metadata, results, filtered)
+
+    print("update_history: done", flush=True)
 
     return 0
 

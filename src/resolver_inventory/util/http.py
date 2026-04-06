@@ -2,13 +2,15 @@
 
 from __future__ import annotations
 
+import ssl
+
 import httpx
 
 
 def build_doh_client(
     *,
     timeout_s: float = 5.0,
-    verify: bool | str = True,
+    verify: bool | str | ssl.SSLContext = True,
 ) -> httpx.AsyncClient:
     """Return an async httpx client configured for DoH use."""
     return httpx.AsyncClient(

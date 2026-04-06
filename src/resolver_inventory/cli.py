@@ -94,8 +94,9 @@ class _ValidateProgressReporter:
         self.every = max(1, every)
         self._start = time.monotonic()
         self._last_emitted = 0
-        self._valid = 0
-        self._invalid = 0
+        self._accepted = 0
+        self._candidate = 0
+        self._rejected = 0
         self._lock = threading.Lock()
 
     def emit_start(self) -> None:
@@ -104,9 +105,11 @@ class _ValidateProgressReporter:
     def callback(self, progress: ValidationProgress) -> None:
         with self._lock:
             if progress.result.status == "accepted":
-                self._valid += 1
+                self._accepted += 1
+            elif progress.result.status == "candidate":
+                self._candidate += 1
             else:
-                self._invalid += 1
+                self._rejected += 1
 
             should_emit = (
                 progress.completed == self.total
@@ -125,7 +128,8 @@ class _ValidateProgressReporter:
             elapsed = _format_elapsed(time.monotonic() - self._start)
             print(
                 f"[validate] done processed={self.total} total={self.total} "
-                f"percent=100 elapsed={elapsed} valid={self._valid} invalid={self._invalid}",
+                f"percent=100 elapsed={elapsed} accepted={self._accepted} "
+                f"candidate={self._candidate} rejected={self._rejected}",
                 flush=True,
             )
 
@@ -134,7 +138,8 @@ class _ValidateProgressReporter:
         elapsed = _format_elapsed(time.monotonic() - self._start)
         print(
             f"[validate] progress done={done} total={self.total} "
-            f"percent={percent} elapsed={elapsed}",
+            f"percent={percent} elapsed={elapsed} accepted={self._accepted} "
+            f"candidate={self._candidate} rejected={self._rejected}",
             flush=True,
         )
 

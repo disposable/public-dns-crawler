@@ -20,6 +20,7 @@ path = "configs/manual-doh.toml"
 rounds = 3
 timeout_ms = 2000
 parallelism = 50
+doh_parallelism = 20
 require_tcp_for_dns = false
 require_tls_valid_for_doh = true
 

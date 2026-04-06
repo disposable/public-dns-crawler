@@ -11,6 +11,7 @@ import dns.rdatatype
 import httpx
 
 from resolver_inventory.models import Candidate, ProbeResult
+from resolver_inventory.util.http import build_doh_client
 from resolver_inventory.util.logging import get_logger
 from resolver_inventory.validate.base import (
     fail_probe,
@@ -169,6 +170,7 @@ async def validate_doh_candidate(
     ssl_context: ssl.SSLContext | None = None,
     baseline_resolvers: list[str] | None = None,
     baseline_cache: dict[tuple[str, str], list[str]] | None = None,
+    client: httpx.AsyncClient | None = None,
 ) -> list[ProbeResult]:
     """Run all DoH probes against a DoH candidate."""
     url = candidate.endpoint_url or ""
@@ -178,13 +180,7 @@ async def validate_doh_candidate(
     verify: bool | ssl.SSLContext = ssl_context if ssl_context is not None else True
 
     async def _run_probes() -> list[ProbeResult]:
-        async with httpx.AsyncClient(
-            http2=True,
-            timeout=httpx.Timeout(timeout_s),
-            verify=verify,
-            follow_redirects=False,
-            headers={"Accept": DOH_CONTENT_TYPE},
-        ) as client:
+        async def _execute(active_client: httpx.AsyncClient) -> list[ProbeResult]:
             # Pre-warm the HTTP/2 connection so that TLS handshake time is not
             # included in per-probe latency measurements.  Without this, all
             # probes fire via asyncio.gather and each starts its timer before
@@ -192,7 +188,7 @@ async def validate_doh_candidate(
             # reading by the full TLS setup time.
             try:
                 warmup_wire = _build_wire("a.root-servers.net.", "A")
-                await _doh_post(client, url, warmup_wire)
+                await _doh_post(active_client, url, warmup_wire)
             except Exception:
                 pass
 
@@ -202,7 +198,7 @@ async def validate_doh_candidate(
                     coros.append(
                         _probe_positive_doh(
                             entry,
-                            client,
+                            active_client,
                             url,
                             timeout_s,
                             baseline_resolvers,
@@ -210,8 +206,14 @@ async def validate_doh_candidate(
                         )
                     )
                 for entry in corpus.nxdomain:
-                    coros.append(_probe_nxdomain_doh(entry, client, url))
+                    coros.append(_probe_nxdomain_doh(entry, active_client, url))
             return list(await asyncio.gather(*coros))
+
+        if client is not None:
+            return await _execute(client)
+
+        async with build_doh_client(timeout_s=timeout_s, verify=verify) as owned_client:
+            return await _execute(owned_client)
 
     tls_result, probe_results = await asyncio.gather(
         _probe_tls(candidate, timeout_s, ssl_context),

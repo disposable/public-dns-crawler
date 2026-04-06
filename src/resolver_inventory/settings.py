@@ -24,6 +24,7 @@ class ValidationConfig:
     rounds: int = 3
     timeout_ms: int = 2000
     parallelism: int = 50
+    doh_parallelism: int = 20
     require_tcp_for_dns: bool = False
     require_tls_valid_for_doh: bool = True
     baseline_resolvers: list[str] = field(default_factory=lambda: ["1.1.1.1", "9.9.9.9", "8.8.8.8"])
@@ -172,6 +173,7 @@ def load_settings(path: str | Path | None = None) -> Settings:
         vc.rounds = int(v.get("rounds", vc.rounds))
         vc.timeout_ms = int(v.get("timeout_ms", vc.timeout_ms))
         vc.parallelism = int(v.get("parallelism", vc.parallelism))
+        vc.doh_parallelism = int(v.get("doh_parallelism", vc.doh_parallelism))
         vc.require_tcp_for_dns = bool(v.get("require_tcp_for_dns", vc.require_tcp_for_dns))
         vc.require_tls_valid_for_doh = bool(
             v.get("require_tls_valid_for_doh", vc.require_tls_valid_for_doh)

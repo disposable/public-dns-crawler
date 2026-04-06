@@ -211,7 +211,7 @@ class TestValidateProgressReporter:
         assert any("progress done=200 total=234" in line for line in lines)
         assert any("progress done=234 total=234 percent=100" in line for line in lines)
         assert lines[-1].startswith("[validate] done processed=234 total=234 percent=100 ")
-        assert "valid=234 invalid=0" in lines[-1]
+        assert "accepted=234 candidate=0 rejected=0" in lines[-1]
 
     def test_parallel_callback_accounting(self, capsys: pytest.CaptureFixture[str]) -> None:
         import concurrent.futures
@@ -244,7 +244,7 @@ class TestValidateProgressReporter:
         assert any("progress done=150 total=200" in line for line in lines)
         assert any("progress done=200 total=200 percent=100" in line for line in lines)
         assert lines[-1].startswith("[validate] done processed=200 total=200 percent=100 ")
-        assert "valid=100 invalid=100" in lines[-1]
+        assert "accepted=100 candidate=0 rejected=100" in lines[-1]
 
 
 class TestCliExport:
