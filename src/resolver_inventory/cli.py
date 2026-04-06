@@ -66,10 +66,20 @@ def _make_validation_progress_logger(
             if progress.completed % every != 0 and (now - last_emit) < interval_s:
                 return
         last_emit = now
-        message = (
-            f"{label} progress: {progress.completed}/{progress.total} "
-            f"({progress.result.status}) {progress.candidate}"
-        )
+        if progress.result is not None:
+            message = (
+                f"{label} progress: {progress.completed}/{progress.total} "
+                f"({progress.result.status}) {progress.candidate}"
+            )
+        else:
+            pct = (
+                int(progress.probes_done * 100 / progress.probes_total)
+                if progress.probes_total
+                else 0
+            )
+            message = (
+                f"{label} progress: probes {progress.probes_done}/{progress.probes_total} ({pct}%)"
+            )
         logger.info(message)
         _github_notice(message)
 
@@ -104,21 +114,25 @@ class _ValidateProgressReporter:
 
     def callback(self, progress: ValidationProgress) -> None:
         with self._lock:
-            if progress.result.status == "accepted":
-                self._accepted += 1
-            elif progress.result.status == "candidate":
-                self._candidate += 1
-            else:
-                self._rejected += 1
+            if progress.result is not None:
+                if progress.result.status == "accepted":
+                    self._accepted += 1
+                elif progress.result.status == "candidate":
+                    self._candidate += 1
+                else:
+                    self._rejected += 1
 
+            is_heartbeat = progress.result is None
             should_emit = (
-                progress.completed == self.total
+                is_heartbeat
+                or progress.completed == self.total
                 or (progress.completed - self._last_emitted) >= self.every
             )
             if not should_emit:
                 return
-            self._emit_progress(progress.completed)
-            self._last_emitted = progress.completed
+            self._emit_progress(progress.completed, progress.probes_done, progress.probes_total)
+            if not is_heartbeat:
+                self._last_emitted = progress.completed
 
     def emit_done(self) -> None:
         with self._lock:
@@ -133,12 +147,13 @@ class _ValidateProgressReporter:
                 flush=True,
             )
 
-    def _emit_progress(self, done: int) -> None:
+    def _emit_progress(self, done: int, probes_done: int = 0, probes_total: int = 0) -> None:
         percent = 100 if self.total == 0 else int((done * 100) / self.total)
         elapsed = _format_elapsed(time.monotonic() - self._start)
+        probe_info = f" probes={probes_done}/{probes_total}" if probes_total > 0 else ""
         print(
             f"[validate] progress done={done} total={self.total} "
-            f"percent={percent} elapsed={elapsed} accepted={self._accepted} "
+            f"percent={percent} elapsed={elapsed}{probe_info} accepted={self._accepted} "
             f"candidate={self._candidate} rejected={self._rejected}",
             flush=True,
         )

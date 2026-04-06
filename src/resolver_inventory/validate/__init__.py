@@ -10,7 +10,6 @@ from __future__ import annotations
 import asyncio
 import contextlib
 import random
-import time
 from collections.abc import Callable
 from dataclasses import dataclass
 from typing import Any
@@ -18,7 +17,6 @@ from typing import Any
 from resolver_inventory.models import Candidate, ProbeResult, ValidationResult
 from resolver_inventory.settings import Settings
 from resolver_inventory.util.http import build_doh_client
-from resolver_inventory.util.logging import get_logger
 from resolver_inventory.validate.base import resolve_baseline_answers
 from resolver_inventory.validate.corpus import CorpusEntry, build_corpus
 from resolver_inventory.validate.dns_plain import _probe_nxdomain, _probe_positive
@@ -31,7 +29,6 @@ from resolver_inventory.validate.doh import (
 )
 from resolver_inventory.validate.scorer import score
 
-logger = get_logger(__name__)
 ProgressCallback = Callable[["ValidationProgress"], None]
 
 
@@ -39,8 +36,11 @@ ProgressCallback = Callable[["ValidationProgress"], None]
 class ValidationProgress:
     completed: int
     total: int
-    candidate: Candidate
-    result: ValidationResult
+    candidate: Candidate | None = None
+    result: ValidationResult | None = None
+    # Probe-level stats — populated on both candidate completions and heartbeats.
+    probes_done: int = 0
+    probes_total: int = 0
 
 
 # A probe task describes one individual probe to run.
@@ -163,6 +163,8 @@ async def _run_flat_queue(
                                 total=overall_total,
                                 candidate=candidates[task.candidate_idx],
                                 result=validation_result,
+                                probes_done=sum(probe_counts),
+                                probes_total=total_probes,
                             )
                         )
             finally:
@@ -171,22 +173,18 @@ async def _run_flat_queue(
     total_probes = len(tasks)
 
     async def _heartbeat(interval_s: float = 30.0) -> None:
-        """Log probe-level progress periodically so long runs aren't silent."""
-        start = time.monotonic()
+        """Emit periodic probe-level progress so long runs aren't silent."""
         while True:
             await asyncio.sleep(interval_s)
-            probes_done = sum(probe_counts)
-            pct = int(probes_done * 100 / total_probes) if total_probes else 0
-            elapsed_s = int(time.monotonic() - start)
-            logger.info(
-                "validation probes %d/%d (%d%%) elapsed=%ds candidates=%d/%d",
-                probes_done,
-                total_probes,
-                pct,
-                elapsed_s,
-                completed_count,
-                overall_total,
-            )
+            if progress_callback is not None:
+                progress_callback(
+                    ValidationProgress(
+                        completed=completed_offset + completed_count,
+                        total=overall_total,
+                        probes_done=sum(probe_counts),
+                        probes_total=total_probes,
+                    )
+                )
 
     worker_count = max(1, min(parallelism, len(tasks)))
     worker_tasks = [asyncio.create_task(worker()) for _ in range(worker_count)]
