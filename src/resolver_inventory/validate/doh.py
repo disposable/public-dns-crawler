@@ -181,17 +181,6 @@ async def validate_doh_candidate(
 
     async def _run_probes() -> list[ProbeResult]:
         async def _execute(active_client: httpx.AsyncClient) -> list[ProbeResult]:
-            # Pre-warm the HTTP/2 connection so that TLS handshake time is not
-            # included in per-probe latency measurements.  Without this, all
-            # probes fire via asyncio.gather and each starts its timer before
-            # the shared connection is established, inflating every latency
-            # reading by the full TLS setup time.
-            try:
-                warmup_wire = _build_wire("a.root-servers.net.", "A")
-                await _doh_post(active_client, url, warmup_wire)
-            except Exception:
-                pass
-
             coros = []
             for _ in range(rounds):
                 for entry in corpus.positive:

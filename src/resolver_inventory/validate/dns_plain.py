@@ -164,5 +164,4 @@ async def validate_dns_candidate(
             )
         for entry in corpus.nxdomain:
             coros.append(_probe_nxdomain(entry, host, port, transport, timeout_s))
-
     return list(await asyncio.gather(*coros))
