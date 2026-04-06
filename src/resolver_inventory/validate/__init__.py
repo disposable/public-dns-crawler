@@ -10,6 +10,7 @@ from __future__ import annotations
 import asyncio
 import contextlib
 import random
+import time
 from collections.abc import Callable
 from dataclasses import dataclass
 from typing import Any
@@ -17,6 +18,7 @@ from typing import Any
 from resolver_inventory.models import Candidate, ProbeResult, ValidationResult
 from resolver_inventory.settings import Settings
 from resolver_inventory.util.http import build_doh_client
+from resolver_inventory.util.logging import get_logger
 from resolver_inventory.validate.base import resolve_baseline_answers
 from resolver_inventory.validate.corpus import CorpusEntry, build_corpus
 from resolver_inventory.validate.dns_plain import _probe_nxdomain, _probe_positive
@@ -29,6 +31,7 @@ from resolver_inventory.validate.doh import (
 )
 from resolver_inventory.validate.scorer import score
 
+logger = get_logger(__name__)
 ProgressCallback = Callable[["ValidationProgress"], None]
 
 
@@ -165,11 +168,35 @@ async def _run_flat_queue(
             finally:
                 queue.task_done()
 
+    total_probes = len(tasks)
+
+    async def _heartbeat(interval_s: float = 30.0) -> None:
+        """Log probe-level progress periodically so long runs aren't silent."""
+        start = time.monotonic()
+        while True:
+            await asyncio.sleep(interval_s)
+            probes_done = sum(probe_counts)
+            pct = int(probes_done * 100 / total_probes) if total_probes else 0
+            elapsed_s = int(time.monotonic() - start)
+            logger.info(
+                "validation probes %d/%d (%d%%) elapsed=%ds candidates=%d/%d",
+                probes_done,
+                total_probes,
+                pct,
+                elapsed_s,
+                completed_count,
+                overall_total,
+            )
+
     worker_count = max(1, min(parallelism, len(tasks)))
     worker_tasks = [asyncio.create_task(worker()) for _ in range(worker_count)]
+    heartbeat_task = asyncio.create_task(_heartbeat())
     try:
         await queue.join()
     finally:
+        heartbeat_task.cancel()
+        with contextlib.suppress(asyncio.CancelledError):
+            await heartbeat_task
         for wt in worker_tasks:
             wt.cancel()
         for wt in worker_tasks:
