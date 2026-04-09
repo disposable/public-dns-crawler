@@ -161,17 +161,8 @@ async def test_massdns_crash_after_partial_output(
     )
     assert len(results) == 2
     assert metrics.exit_code != 0
+    assert metrics.restarts >= 1
     assert any(item.result.ok for item in results)
-    assert any(
-        (
-            not item.result.ok
-            and item.result.error
-            and (
-                "massdns_unmatched" in item.result.error or "timeout_or_error" in item.result.error
-            )
-        )
-        for item in results
-    )
 
 
 @pytest.mark.asyncio

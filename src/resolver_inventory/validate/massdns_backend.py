@@ -1,4 +1,4 @@
-"""MassDNS backend for batched plain-DNS probing via streaming pipes."""
+"""MassDNS backend for long-lived plain-DNS probing via streaming pipes."""
 
 from __future__ import annotations
 
@@ -7,7 +7,8 @@ import contextlib
 import json
 import os
 import tempfile
-from collections import defaultdict
+from collections import defaultdict, deque
+from collections.abc import Callable, Iterable
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -31,7 +32,7 @@ logger = get_logger(__name__)
 
 @dataclass(frozen=True, slots=True)
 class MassDnsParsedResult:
-    resolver: str
+    resolver: str | None
     qname: str
     rdtype: str
     rcode: str | None = None
@@ -41,12 +42,28 @@ class MassDnsParsedResult:
 
 
 @dataclass(frozen=True, slots=True)
-class MassDnsBatchMetrics:
+class MassDnsSessionMetrics:
     stdout_lines: int = 0
     stderr_lines: int = 0
     parsed_results: int = 0
     unmatched_results: int = 0
+    terminal_failures_matched: int = 0
+    probes_sent: int = 0
     exit_code: int = 0
+    restarts: int = 0
+
+
+MassDnsBatchMetrics = MassDnsSessionMetrics
+
+
+@dataclass(slots=True)
+class _MassDnsWorker:
+    proc: asyncio.subprocess.Process
+    resolver_path: Path
+    stderr_task: asyncio.Task[int]
+
+
+PlainDnsSpecSource = Callable[[], Iterable[PlainDnsProbeSpec]]
 
 
 def group_probe_specs_for_massdns(
@@ -102,26 +119,14 @@ def build_massdns_command(
 
 
 def build_manifest_line(spec: PlainDnsProbeSpec) -> str:
-    resolver = f"{spec.host}:{spec.port}"
-    return f"{spec.qname} {resolver}\n"
-
-
-async def stream_manifest_to_massdns(
-    stdin: asyncio.StreamWriter,
-    specs: list[PlainDnsProbeSpec],
-) -> None:
-    for spec in specs:
-        stdin.write(build_manifest_line(spec).encode("utf-8"))
-        await stdin.drain()
-    stdin.close()
-    await stdin.wait_closed()
+    return f"{spec.qname} {spec.host}:{spec.port}\n"
 
 
 def _result_identity_key(resolver: str, qname: str, rdtype: str) -> tuple[str, str, str]:
     q = qname.lower().rstrip(".") + "."
     rdt = rdtype.upper()
     if ":" in resolver and resolver.count(":") == 1:
-        host, port = resolver.split(":", 1)
+        host, port = resolver.rsplit(":", 1)
         return host, str(int(port)), q + rdt
     return resolver, "53", q + rdt
 
@@ -129,6 +134,11 @@ def _result_identity_key(resolver: str, qname: str, rdtype: str) -> tuple[str, s
 def _spec_identity_key(spec: PlainDnsProbeSpec) -> tuple[str, str, str]:
     q = spec.qname.lower().rstrip(".") + "."
     return spec.host, str(spec.port), q + spec.rdtype.upper()
+
+
+def _name_type_identity_key(qname: str, rdtype: str) -> tuple[str, str]:
+    q = qname.lower().rstrip(".") + "."
+    return q, rdtype.upper()
 
 
 def _extract_answers(record: dict[str, object], rdtype: str) -> list[str]:
@@ -164,9 +174,10 @@ def parse_massdns_ndjson_line(
         raise ValueError("massdns output line is not a JSON object")
 
     qname = str(decoded.get("name") or decoded.get("qname") or "")
-    resolver = str(decoded.get("resolver") or decoded.get("resolver_ip") or "")
+    resolver_raw = decoded.get("resolver") or decoded.get("resolver_ip")
+    resolver = None if resolver_raw in (None, "") else str(resolver_raw)
     rdtype = str(decoded.get("type") or decoded.get("qtype") or default_rdtype or "")
-    if not qname or not resolver or not rdtype:
+    if not qname or not rdtype:
         raise ValueError(
             "massdns output line missing required fields: "
             f"has_qname={bool(qname)} has_resolver={bool(resolver)} has_rdtype={bool(rdtype)}"
@@ -182,13 +193,12 @@ def parse_massdns_ndjson_line(
     if isinstance(latency_raw, (int, float)):
         latency_ms = float(latency_raw)
 
-    answers = _extract_answers(decoded, rdtype)
     return MassDnsParsedResult(
         resolver=resolver,
         qname=qname,
         rdtype=rdtype,
         rcode=None if rcode is None else str(rcode).upper(),
-        answers=answers,
+        answers=_extract_answers(decoded, rdtype),
         latency_ms=latency_ms,
         terminal_error=None if terminal_error is None else str(terminal_error),
     )
@@ -196,13 +206,42 @@ def parse_massdns_ndjson_line(
 
 async def parse_massdns_ndjson_stream(
     stdout: asyncio.StreamReader,
-    pending_by_key: dict[tuple[str, str, str], list[PlainDnsProbeSpec]],
+    pending_by_key: (
+        dict[tuple[str, str, str], deque[PlainDnsProbeSpec]]
+        | dict[tuple[str, str, str], list[PlainDnsProbeSpec]]
+    ),
+    pending_by_name_type: dict[tuple[str, str], deque[PlainDnsProbeSpec]] | None = None,
     *,
     default_rdtype: str | None = None,
 ) -> tuple[list[tuple[PlainDnsProbeSpec, MassDnsParsedResult]], int, int]:
     matched: list[tuple[PlainDnsProbeSpec, MassDnsParsedResult]] = []
     unmatched = 0
     stdout_lines = 0
+    resolved_probe_ids: set[str] = set()
+    by_key = {
+        key: value if isinstance(value, deque) else deque(value)
+        for key, value in pending_by_key.items()
+    }
+    if pending_by_name_type is None:
+        by_name_type: dict[tuple[str, str], deque[PlainDnsProbeSpec]] = defaultdict(deque)
+        for queue in by_key.values():
+            for spec in queue:
+                by_name_type[_name_type_identity_key(spec.qname, spec.rdtype)].append(spec)
+    else:
+        by_name_type = {
+            key: value if isinstance(value, deque) else deque(value)
+            for key, value in pending_by_name_type.items()
+        }
+
+    def _pop_pending(queue: deque[PlainDnsProbeSpec] | None) -> PlainDnsProbeSpec | None:
+        if queue is None:
+            return None
+        while queue:
+            spec = queue.popleft()
+            if spec.probe_id not in resolved_probe_ids:
+                return spec
+        return None
+
     while True:
         raw = await stdout.readline()
         if not raw:
@@ -211,20 +250,19 @@ async def parse_massdns_ndjson_stream(
         line = raw.decode("utf-8", errors="replace").strip()
         if not line:
             continue
-        try:
-            parsed = parse_massdns_ndjson_line(line, default_rdtype=default_rdtype)
-        except ValueError as exc:
-            if "missing required fields" in str(exc):
-                unmatched += 1
-                logger.debug("ignoring unmatched massdns line: %s", line[:200])
-                continue
-            raise
-        key = _result_identity_key(parsed.resolver, parsed.qname, parsed.rdtype)
-        pending = pending_by_key.get(key)
-        if not pending:
+        parsed = parse_massdns_ndjson_line(line, default_rdtype=default_rdtype)
+        if parsed.resolver:
+            spec = _pop_pending(
+                by_key.get(_result_identity_key(parsed.resolver, parsed.qname, parsed.rdtype))
+            )
+        else:
+            spec = _pop_pending(
+                by_name_type.get(_name_type_identity_key(parsed.qname, parsed.rdtype))
+            )
+        if spec is None:
             unmatched += 1
             continue
-        spec = pending.pop(0)
+        resolved_probe_ids.add(spec.probe_id)
         matched.append((spec, parsed))
     return matched, unmatched, stdout_lines
 
@@ -284,94 +322,82 @@ async def _drain_stderr(
     return lines
 
 
-async def run_massdns_batch(
-    specs: list[PlainDnsProbeSpec],
+async def start_massdns_worker(
     *,
     config: DnsBackendConfig,
-    timeout_s: float,
-    baseline_resolvers: list[str],
-    baseline_cache: dict[tuple[str, str], list[str]],
-    on_execution: PlainDnsExecutionCallback | None = None,
-) -> tuple[list[PlainDnsProbeExecution], MassDnsBatchMetrics]:
-    if not specs:
-        return [], MassDnsBatchMetrics()
-
-    pending_by_key: dict[tuple[str, str, str], list[PlainDnsProbeSpec]] = defaultdict(list)
-    for spec in specs:
-        pending_by_key[_spec_identity_key(spec)].append(spec)
-
-    resolvers = sorted({f"{spec.host}:{spec.port}" for spec in specs}) or ["127.0.0.1:53"]
+    rdtype: str,
+    resolvers: list[str],
+) -> _MassDnsWorker:
     with tempfile.NamedTemporaryFile("w", delete=False, encoding="utf-8") as resolver_file:
         resolver_file.write("\n".join(resolvers))
         resolver_file.write("\n")
         resolver_path = Path(resolver_file.name)
-
-    rdtype = specs[0].rdtype.upper()
     cmd = build_massdns_command(config=config, rdtype=rdtype, resolver_file=resolver_path)
-    logger.debug("massdns command: %s", " ".join(cmd))
-
-    try:
-        proc = await asyncio.create_subprocess_exec(
-            *cmd,
-            stdin=asyncio.subprocess.PIPE,
-            stdout=asyncio.subprocess.PIPE,
-            stderr=asyncio.subprocess.PIPE,
-        )
-    except FileNotFoundError:
-        raise
-    except Exception as exc:
-        raise RuntimeError(f"failed to start massdns: {exc}") from exc
-
-    assert proc.stdin is not None
-    assert proc.stdout is not None
+    logger.debug("massdns session command: %s", " ".join(cmd))
+    proc = await asyncio.create_subprocess_exec(
+        *cmd,
+        stdin=asyncio.subprocess.PIPE,
+        stdout=asyncio.subprocess.PIPE,
+        stderr=asyncio.subprocess.PIPE,
+    )
     assert proc.stderr is not None
-
     stderr_task = asyncio.create_task(_drain_stderr(proc.stderr, log_level=config.stderr_log_level))
+    return _MassDnsWorker(proc=proc, resolver_path=resolver_path, stderr_task=stderr_task)
+
+
+async def close_massdns_worker(worker: _MassDnsWorker) -> int:
     try:
-        timeout_factor = max(6.0, min(20.0, len(specs) / 5.0))
-        batch_timeout_s = max(1.0, timeout_s * timeout_factor)
-        logger.debug(
-            "massdns batch timeout: %.2fs (timeout_s=%.2fs factor=%.2f specs=%d)",
-            batch_timeout_s,
-            timeout_s,
-            timeout_factor,
-            len(specs),
-        )
-        async with asyncio.timeout(batch_timeout_s):
-            manifest_task = asyncio.create_task(stream_manifest_to_massdns(proc.stdin, specs))
-            matched, unmatched, stdout_lines = await parse_massdns_ndjson_stream(
-                proc.stdout,
-                pending_by_key,
-                default_rdtype=rdtype,
-            )
-            await manifest_task
-            return_code = await proc.wait()
-        stderr_lines = await stderr_task
-    except TimeoutError as exc:
-        with contextlib.suppress(ProcessLookupError):
-            proc.terminate()
-        with contextlib.suppress(Exception):
-            await asyncio.wait_for(proc.wait(), timeout=1.0)
-        stderr_task.cancel()
-        with contextlib.suppress(asyncio.CancelledError):
-            await stderr_task
-        raise TimeoutError("massdns batch timed out") from exc
-    except Exception:
-        with contextlib.suppress(ProcessLookupError):
-            proc.terminate()
-        with contextlib.suppress(Exception):
-            await asyncio.wait_for(proc.wait(), timeout=1.0)
-        stderr_task.cancel()
-        with contextlib.suppress(asyncio.CancelledError):
-            await stderr_task
-        raise
+        return await worker.stderr_task
     finally:
         with contextlib.suppress(Exception):
-            os.unlink(resolver_path)
+            os.unlink(worker.resolver_path)
 
+
+def _estimate_session_timeout(timeout_s: float, sent: int) -> float:
+    return max(1.0, timeout_s * max(20.0, min(600.0, sent / 50.0)))
+
+
+async def _run_massdns_attempt(
+    *,
+    source: PlainDnsSpecSource,
+    rdtype: str,
+    config: DnsBackendConfig,
+    timeout_s: float,
+    baseline_resolvers: list[str],
+    baseline_cache: dict[tuple[str, str], list[str]],
+    already_resolved: set[str],
+    on_execution: PlainDnsExecutionCallback | None,
+) -> tuple[MassDnsSessionMetrics, set[str], list[PlainDnsProbeExecution], int]:
+    resolvers_set: set[str] = set()
+    remaining_count = 0
+    for spec in source():
+        if spec.probe_id in already_resolved:
+            continue
+        remaining_count += 1
+        resolvers_set.add(f"{spec.host}:{spec.port}")
+    if remaining_count == 0:
+        return MassDnsSessionMetrics(), set(), [], 0
+    resolvers = sorted(resolvers_set) or ["127.0.0.1:53"]
+    worker = await start_massdns_worker(config=config, rdtype=rdtype, resolvers=resolvers)
+    proc = worker.proc
+    assert proc.stdin is not None
+    assert proc.stdout is not None
+
+    pending_by_key: dict[tuple[str, str, str], deque[PlainDnsProbeSpec]] = defaultdict(deque)
+    pending_by_name_type: dict[tuple[str, str], deque[PlainDnsProbeSpec]] = defaultdict(deque)
+    in_flight_limit = max(1, config.batch_max_queries)
+    current_pending = 0
+    pending_cond = asyncio.Condition()
+    matched_probe_ids: set[str] = set()
     executions: list[PlainDnsProbeExecution] = []
-    yielded_count = 0
-    for spec, parsed in matched:
+    stdout_lines = 0
+    unmatched = 0
+    parsed_results = 0
+    terminal_failures_matched = 0
+    probes_sent = 0
+
+    async def _record_match(spec: PlainDnsProbeSpec, parsed: MassDnsParsedResult) -> None:
+        nonlocal current_pending, parsed_results, terminal_failures_matched
         result = await normalize_massdns_result(
             spec,
             parsed,
@@ -380,30 +406,243 @@ async def run_massdns_batch(
             baseline_cache=baseline_cache,
         )
         execution = PlainDnsProbeExecution(spec=spec, result=result)
-        yielded_count += 1
+        matched_probe_ids.add(spec.probe_id)
+        parsed_results += 1
+        if parsed.terminal_error:
+            terminal_failures_matched += 1
         if on_execution is not None:
             await on_execution(execution)
         else:
             executions.append(execution)
+        async with pending_cond:
+            current_pending -= 1
+            pending_cond.notify_all()
 
-    unresolved = [spec for pending in pending_by_key.values() for spec in pending]
-    if return_code != 0 and not yielded_count:
-        raise RuntimeError(f"massdns exited with code {return_code}")
+    async def _parse_stdout() -> None:
+        nonlocal stdout_lines, unmatched
+        while True:
+            raw = await proc.stdout.readline()
+            if not raw:
+                break
+            stdout_lines += 1
+            line = raw.decode("utf-8", errors="replace").strip()
+            if not line:
+                continue
+            parsed = parse_massdns_ndjson_line(line, default_rdtype=rdtype)
+            if parsed.resolver:
+                key = _result_identity_key(parsed.resolver, parsed.qname, parsed.rdtype)
+                queue = pending_by_key.get(key)
+            else:
+                key = _name_type_identity_key(parsed.qname, parsed.rdtype)
+                queue = pending_by_name_type.get(key)
+            if not queue:
+                unmatched += 1
+                logger.debug("ignoring unmatched massdns line: %s", line[:200])
+                continue
+            while queue:
+                spec = queue.popleft()
+                if spec.probe_id not in matched_probe_ids:
+                    await _record_match(spec, parsed)
+                    break
+            else:
+                unmatched += 1
 
-    if unresolved:
-        if return_code != 0 and config.fallback_to_python_on_error:
-            fallback_results = await run_python_plain_dns_batch(
-                unresolved,
-                timeout_s=timeout_s,
-                baseline_resolvers=baseline_resolvers,
-                baseline_cache=baseline_cache,
-                parallelism=1,
-                on_execution=on_execution,
-            )
-            if on_execution is None:
-                executions.extend(fallback_results)
+    parser_task = asyncio.create_task(_parse_stdout())
+    try:
+        buffer = bytearray()
+        for spec in source():
+            if spec.probe_id in already_resolved:
+                continue
+            async with pending_cond:
+                while current_pending >= in_flight_limit:
+                    await pending_cond.wait()
+            pending_by_key[_spec_identity_key(spec)].append(spec)
+            pending_by_name_type[_name_type_identity_key(spec.qname, spec.rdtype)].append(spec)
+            current_pending += 1
+            probes_sent += 1
+            buffer.extend(build_manifest_line(spec).encode("utf-8"))
+            if len(buffer) >= 65536:
+                proc.stdin.write(buffer)
+                buffer.clear()
+                await proc.stdin.drain()
+        if buffer:
+            proc.stdin.write(buffer)
+            await proc.stdin.drain()
+        proc.stdin.close()
+        await proc.stdin.wait_closed()
+
+        timeout_window = _estimate_session_timeout(timeout_s, max(probes_sent, remaining_count))
+        async with asyncio.timeout(timeout_window):
+            await parser_task
+            return_code = await proc.wait()
+        stderr_lines = await close_massdns_worker(worker)
+    except TimeoutError as exc:
+        with contextlib.suppress(ProcessLookupError):
+            proc.terminate()
+        with contextlib.suppress(Exception):
+            await asyncio.wait_for(proc.wait(), timeout=1.0)
+        parser_task.cancel()
+        with contextlib.suppress(asyncio.CancelledError):
+            await parser_task
+        worker.stderr_task.cancel()
+        with contextlib.suppress(asyncio.CancelledError):
+            await worker.stderr_task
+        with contextlib.suppress(Exception):
+            os.unlink(worker.resolver_path)
+        raise TimeoutError("massdns batch timed out") from exc
+    except Exception:
+        with contextlib.suppress(ProcessLookupError):
+            proc.terminate()
+        with contextlib.suppress(Exception):
+            await asyncio.wait_for(proc.wait(), timeout=1.0)
+        parser_task.cancel()
+        with contextlib.suppress(asyncio.CancelledError):
+            await parser_task
+        worker.stderr_task.cancel()
+        with contextlib.suppress(asyncio.CancelledError):
+            await worker.stderr_task
+        with contextlib.suppress(Exception):
+            os.unlink(worker.resolver_path)
+        raise
+
+    metrics = MassDnsSessionMetrics(
+        stdout_lines=stdout_lines,
+        stderr_lines=stderr_lines,
+        parsed_results=parsed_results,
+        unmatched_results=unmatched,
+        terminal_failures_matched=terminal_failures_matched,
+        probes_sent=probes_sent,
+        exit_code=return_code,
+    )
+    return metrics, matched_probe_ids, executions, remaining_count
+
+
+async def run_massdns_rdtype_session(
+    specs: Iterable[PlainDnsProbeSpec] | PlainDnsSpecSource,
+    *,
+    rdtype: str,
+    config: DnsBackendConfig,
+    timeout_s: float,
+    baseline_resolvers: list[str],
+    baseline_cache: dict[tuple[str, str], list[str]],
+    on_execution: PlainDnsExecutionCallback | None = None,
+) -> tuple[list[PlainDnsProbeExecution], MassDnsSessionMetrics]:
+    if callable(specs):
+        source = specs
+    else:
+        materialized = tuple(specs)
+
+        def source() -> Iterable[PlainDnsProbeSpec]:
+            return iter(materialized)
+
+    resolved_probe_ids: set[str] = set()
+    all_executions: list[PlainDnsProbeExecution] = []
+    total = MassDnsSessionMetrics()
+    restarts = 0
+
+    def _count_remaining() -> int:
+        return sum(1 for spec in source() if spec.probe_id not in resolved_probe_ids)
+
+    while _count_remaining() > 0:
+        metrics, matched_ids, executions, remaining_before = await _run_massdns_attempt(
+            source=source,
+            rdtype=rdtype,
+            config=config,
+            timeout_s=timeout_s,
+            baseline_resolvers=baseline_resolvers,
+            baseline_cache=baseline_cache,
+            already_resolved=resolved_probe_ids,
+            on_execution=on_execution,
+        )
+        resolved_probe_ids.update(matched_ids)
+        if on_execution is None:
+            all_executions.extend(executions)
+        exit_code = total.exit_code if total.exit_code != 0 else metrics.exit_code
+        total = MassDnsSessionMetrics(
+            stdout_lines=total.stdout_lines + metrics.stdout_lines,
+            stderr_lines=total.stderr_lines + metrics.stderr_lines,
+            parsed_results=total.parsed_results + metrics.parsed_results,
+            unmatched_results=total.unmatched_results + metrics.unmatched_results,
+            terminal_failures_matched=(
+                total.terminal_failures_matched + metrics.terminal_failures_matched
+            ),
+            probes_sent=total.probes_sent + metrics.probes_sent,
+            exit_code=exit_code,
+            restarts=restarts,
+        )
+        logger.debug(
+            (
+                "massdns session rdtype=%s sent=%d parsed=%d stdout_lines=%d "
+                "stderr_lines=%d unmatched=%d terminal_failures=%d exit_code=%d restart=%d"
+            ),
+            rdtype,
+            metrics.probes_sent,
+            metrics.parsed_results,
+            metrics.stdout_lines,
+            metrics.stderr_lines,
+            metrics.unmatched_results,
+            metrics.terminal_failures_matched,
+            metrics.exit_code,
+            restarts,
+        )
+        if metrics.exit_code == 0:
+            break
+        if _count_remaining() == 0 or remaining_before == 0:
+            break
+        restarts += 1
+        logger.warning(
+            "massdns session rdtype=%s exited non-zero, restarting unresolved probes",
+            rdtype,
+        )
+
+    total = MassDnsSessionMetrics(
+        stdout_lines=total.stdout_lines,
+        stderr_lines=total.stderr_lines,
+        parsed_results=total.parsed_results,
+        unmatched_results=total.unmatched_results,
+        terminal_failures_matched=total.terminal_failures_matched,
+        probes_sent=total.probes_sent,
+        exit_code=total.exit_code,
+        restarts=restarts,
+    )
+
+    unresolved_count = _count_remaining()
+    if unresolved_count:
+        if total.exit_code != 0 and config.fallback_to_python_on_error:
+            pending_batch: list[PlainDnsProbeSpec] = []
+            for spec in source():
+                if spec.probe_id in resolved_probe_ids:
+                    continue
+                pending_batch.append(spec)
+                if len(pending_batch) >= max(1, config.batch_max_queries):
+                    fallback_results = await run_python_plain_dns_batch(
+                        pending_batch,
+                        timeout_s=timeout_s,
+                        baseline_resolvers=baseline_resolvers,
+                        baseline_cache=baseline_cache,
+                        parallelism=1,
+                        on_execution=on_execution,
+                    )
+                    if on_execution is None:
+                        all_executions.extend(fallback_results)
+                    pending_batch = []
+            if pending_batch:
+                fallback_results = await run_python_plain_dns_batch(
+                    pending_batch,
+                    timeout_s=timeout_s,
+                    baseline_resolvers=baseline_resolvers,
+                    baseline_cache=baseline_cache,
+                    parallelism=1,
+                    on_execution=on_execution,
+                )
+                if on_execution is None:
+                    all_executions.extend(fallback_results)
+        elif total.exit_code != 0 and not config.fallback_to_python_on_error:
+            raise RuntimeError(f"massdns session exited with code {total.exit_code}")
         else:
-            for spec in unresolved:
+            for spec in source():
+                if spec.probe_id in resolved_probe_ids:
+                    continue
                 execution = PlainDnsProbeExecution(
                     spec=spec,
                     result=fail_probe(spec.probe_name, "timeout_or_error:massdns_unmatched"),
@@ -411,13 +650,27 @@ async def run_massdns_batch(
                 if on_execution is not None:
                     await on_execution(execution)
                 else:
-                    executions.append(execution)
+                    all_executions.append(execution)
+    return all_executions, total
 
-    metrics = MassDnsBatchMetrics(
-        stdout_lines=stdout_lines,
-        parsed_results=yielded_count,
-        unmatched_results=unmatched,
-        stderr_lines=stderr_lines,
-        exit_code=return_code,
+
+async def run_massdns_batch(
+    specs: list[PlainDnsProbeSpec],
+    *,
+    config: DnsBackendConfig,
+    timeout_s: float,
+    baseline_resolvers: list[str],
+    baseline_cache: dict[tuple[str, str], list[str]],
+    on_execution: PlainDnsExecutionCallback | None = None,
+) -> tuple[list[PlainDnsProbeExecution], MassDnsSessionMetrics]:
+    if not specs:
+        return [], MassDnsSessionMetrics()
+    return await run_massdns_rdtype_session(
+        specs,
+        rdtype=specs[0].rdtype.upper(),
+        config=config,
+        timeout_s=timeout_s,
+        baseline_resolvers=baseline_resolvers,
+        baseline_cache=baseline_cache,
+        on_execution=on_execution,
     )
-    return executions, metrics
