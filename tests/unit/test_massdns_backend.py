@@ -68,13 +68,19 @@ def test_build_manifest_line() -> None:
 
 
 def test_build_massdns_command() -> None:
-    cfg = DnsBackendConfig(kind="massdns", massdns_bin="/usr/bin/massdns")
+    cfg = DnsBackendConfig(
+        kind="massdns",
+        massdns_bin="/usr/bin/massdns",
+        extra_args=["--bindto", "127.0.0.1", "--rcvbuf=4194304"],
+    )
     cmd = build_massdns_command(config=cfg, rdtype="A", resolver_file="/tmp/r.txt")  # type: ignore[arg-type]
     assert cmd[0] == "/usr/bin/massdns"
     assert "--extended-input" in cmd
     assert "-o" in cmd and "Je" in cmd
     assert "-t" in cmd and "A" in cmd
     assert "--interval" in cmd and "1" in cmd
+    assert "--bindto" in cmd and "127.0.0.1" in cmd
+    assert "--rcvbuf=4194304" in cmd
 
 
 def test_parse_massdns_ndjson_success_line() -> None:

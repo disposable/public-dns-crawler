@@ -96,6 +96,8 @@ def build_massdns_command(
         cmd.append("--flush")
     if config.predictable:
         cmd.append("--predictable")
+    if config.extra_args:
+        cmd.extend(config.extra_args)
     return cmd
 
 
@@ -152,16 +154,23 @@ def _extract_answers(record: dict[str, object], rdtype: str) -> list[str]:
     return normalize_expected_answers(answers, rdtype)
 
 
-def parse_massdns_ndjson_line(line: str) -> MassDnsParsedResult:
+def parse_massdns_ndjson_line(
+    line: str,
+    *,
+    default_rdtype: str | None = None,
+) -> MassDnsParsedResult:
     decoded = json.loads(line)
     if not isinstance(decoded, dict):
         raise ValueError("massdns output line is not a JSON object")
 
     qname = str(decoded.get("name") or decoded.get("qname") or "")
     resolver = str(decoded.get("resolver") or decoded.get("resolver_ip") or "")
-    rdtype = str(decoded.get("type") or decoded.get("qtype") or "")
+    rdtype = str(decoded.get("type") or decoded.get("qtype") or default_rdtype or "")
     if not qname or not resolver or not rdtype:
-        raise ValueError("massdns output line missing resolver/qname/type")
+        raise ValueError(
+            "massdns output line missing required fields: "
+            f"has_qname={bool(qname)} has_resolver={bool(resolver)} has_rdtype={bool(rdtype)}"
+        )
 
     rcode = decoded.get("rcode") or decoded.get("status")
     if rcode is None and isinstance(decoded.get("data"), dict):
@@ -189,26 +198,27 @@ async def parse_massdns_ndjson_stream(
     stdout: asyncio.StreamReader,
     pending_by_key: dict[tuple[str, str, str], list[PlainDnsProbeSpec]],
     *,
-    idle_timeout_s: float | None = None,
+    default_rdtype: str | None = None,
 ) -> tuple[list[tuple[PlainDnsProbeSpec, MassDnsParsedResult]], int, int]:
     matched: list[tuple[PlainDnsProbeSpec, MassDnsParsedResult]] = []
     unmatched = 0
     stdout_lines = 0
     while True:
-        try:
-            if idle_timeout_s is None:
-                raw = await stdout.readline()
-            else:
-                raw = await asyncio.wait_for(stdout.readline(), timeout=idle_timeout_s)
-        except TimeoutError as exc:
-            raise TimeoutError("massdns stdout read timed out") from exc
+        raw = await stdout.readline()
         if not raw:
             break
         stdout_lines += 1
         line = raw.decode("utf-8", errors="replace").strip()
         if not line:
             continue
-        parsed = parse_massdns_ndjson_line(line)
+        try:
+            parsed = parse_massdns_ndjson_line(line, default_rdtype=default_rdtype)
+        except ValueError as exc:
+            if "missing required fields" in str(exc):
+                unmatched += 1
+                logger.debug("ignoring unmatched massdns line: %s", line[:200])
+                continue
+            raise
         key = _result_identity_key(parsed.resolver, parsed.qname, parsed.rdtype)
         pending = pending_by_key.get(key)
         if not pending:
@@ -318,17 +328,34 @@ async def run_massdns_batch(
 
     stderr_task = asyncio.create_task(_drain_stderr(proc.stderr, log_level=config.stderr_log_level))
     try:
-        manifest_task = asyncio.create_task(stream_manifest_to_massdns(proc.stdin, specs))
-        # Bound stalls on stdout so validation.timeout_ms still applies when
-        # the subprocess wedges or stops producing output.
-        matched, unmatched, stdout_lines = await parse_massdns_ndjson_stream(
-            proc.stdout,
-            pending_by_key,
-            idle_timeout_s=max(1.0, timeout_s),
+        timeout_factor = max(6.0, min(20.0, len(specs) / 5.0))
+        batch_timeout_s = max(1.0, timeout_s * timeout_factor)
+        logger.debug(
+            "massdns batch timeout: %.2fs (timeout_s=%.2fs factor=%.2f specs=%d)",
+            batch_timeout_s,
+            timeout_s,
+            timeout_factor,
+            len(specs),
         )
-        await manifest_task
-        return_code = await asyncio.wait_for(proc.wait(), timeout=max(1.0, timeout_s * 2))
+        async with asyncio.timeout(batch_timeout_s):
+            manifest_task = asyncio.create_task(stream_manifest_to_massdns(proc.stdin, specs))
+            matched, unmatched, stdout_lines = await parse_massdns_ndjson_stream(
+                proc.stdout,
+                pending_by_key,
+                default_rdtype=rdtype,
+            )
+            await manifest_task
+            return_code = await proc.wait()
         stderr_lines = await stderr_task
+    except TimeoutError as exc:
+        with contextlib.suppress(ProcessLookupError):
+            proc.terminate()
+        with contextlib.suppress(Exception):
+            await asyncio.wait_for(proc.wait(), timeout=1.0)
+        stderr_task.cancel()
+        with contextlib.suppress(asyncio.CancelledError):
+            await stderr_task
+        raise TimeoutError("massdns batch timed out") from exc
     except Exception:
         with contextlib.suppress(ProcessLookupError):
             proc.terminate()

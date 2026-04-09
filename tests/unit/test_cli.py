@@ -66,11 +66,14 @@ class TestCliParser:
                 "/usr/local/bin/massdns",
                 "--massdns-hashmap-size",
                 "4096",
+                "--massdns-arg=--bindto 127.0.0.1",
+                "--massdns-arg=--rcvbuf=4194304",
             ]
         )
         assert args.dns_backend == "massdns"
         assert args.massdns_bin == "/usr/local/bin/massdns"
         assert args.massdns_hashmap_size == 4096
+        assert args.massdns_arg == ["--bindto 127.0.0.1", "--rcvbuf=4194304"]
 
     def test_validate_progress_every_default(self) -> None:
         parser = _build_parser()
@@ -203,6 +206,7 @@ class TestCliProbeCorpusOverride:
             dns_backend="massdns",
             massdns_bin="/tmp/massdns",
             massdns_hashmap_size=8192,
+            massdns_arg=["--bindto 127.0.0.1", "--rcvbuf=4194304"],
         )
         settings = Settings()
 
@@ -211,6 +215,11 @@ class TestCliProbeCorpusOverride:
         assert settings.validation.dns_backend.kind == "massdns"
         assert settings.validation.dns_backend.massdns_bin == "/tmp/massdns"
         assert settings.validation.dns_backend.hashmap_size == 8192
+        assert settings.validation.dns_backend.extra_args == [
+            "--bindto",
+            "127.0.0.1",
+            "--rcvbuf=4194304",
+        ]
 
 
 class TestValidationCandidateSorting:

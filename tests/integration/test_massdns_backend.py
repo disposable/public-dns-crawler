@@ -182,7 +182,7 @@ async def test_massdns_stalled_stdout_times_out(
     fake = _make_fake_massdns(tmp_path)
     monkeypatch.setenv("FAKE_MASSDNS_MODE", "stall")
     cfg = DnsBackendConfig(kind="massdns", massdns_bin=str(fake))
-    with pytest.raises(TimeoutError, match="stdout read timed out"):
+    with pytest.raises(TimeoutError, match="batch timed out"):
         await run_massdns_batch(
             [_spec("p1")],
             config=cfg,

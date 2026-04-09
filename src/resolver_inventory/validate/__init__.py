@@ -245,6 +245,7 @@ async def _run_plain_dns_specs(
             batches_succeeded += 1
         except FileNotFoundError as exc:
             batches_failed += 1
+            logger.warning("massdns binary missing; falling back to python backend")
             if not backend.fallback_to_python_on_error:
                 raise RuntimeError(f"massdns binary not found: {backend.massdns_bin}") from exc
             python_fallback_probes += len(batch)
@@ -260,6 +261,7 @@ async def _run_plain_dns_specs(
             )
         except Exception:
             batches_failed += 1
+            logger.exception("massdns batch failed; falling back to python backend")
             if not backend.fallback_to_python_on_error:
                 raise
             python_fallback_probes += len(batch)

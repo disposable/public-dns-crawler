@@ -6,6 +6,7 @@ import argparse
 import glob
 import json
 import os
+import shlex
 import sys
 import threading
 import time
@@ -187,6 +188,13 @@ def _apply_dns_backend_overrides(args: argparse.Namespace, settings: Settings) -
     massdns_hashmap_size = getattr(args, "massdns_hashmap_size", None)
     if massdns_hashmap_size is not None:
         settings.validation.dns_backend.hashmap_size = massdns_hashmap_size
+
+    massdns_args = getattr(args, "massdns_arg", None)
+    if massdns_args:
+        flattened: list[str] = []
+        for value in massdns_args:
+            flattened.extend(shlex.split(value))
+        settings.validation.dns_backend.extra_args = flattened
 
 
 def _candidate_sort_key(candidate) -> tuple[str, str, str, int, str]:
@@ -767,6 +775,17 @@ def _build_parser() -> argparse.ArgumentParser:
         help="Override MassDNS hashmap size when --dns-backend=massdns",
     )
     p_validate.add_argument(
+        "--massdns-arg",
+        action="append",
+        metavar="ARG",
+        help=(
+            "Additional MassDNS argument (repeatable). "
+            "Examples: --massdns-arg='--bindto 192.0.2.10' "
+            "--massdns-arg='--rcvbuf=4194304' "
+            "(use --massdns-arg=... when the value starts with '-')"
+        ),
+    )
+    p_validate.add_argument(
         "--progress-every",
         type=int,
         default=100,
@@ -806,6 +825,17 @@ def _build_parser() -> argparse.ArgumentParser:
         type=int,
         metavar="INT",
         help="Override MassDNS hashmap size when --dns-backend=massdns",
+    )
+    p_refresh.add_argument(
+        "--massdns-arg",
+        action="append",
+        metavar="ARG",
+        help=(
+            "Additional MassDNS argument (repeatable). "
+            "Examples: --massdns-arg='--bindto 192.0.2.10' "
+            "--massdns-arg='--rcvbuf=4194304' "
+            "(use --massdns-arg=... when the value starts with '-')"
+        ),
     )
     p_refresh.add_argument(
         "--split-json-max-bytes",

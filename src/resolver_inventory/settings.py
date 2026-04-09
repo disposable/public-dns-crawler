@@ -36,6 +36,7 @@ class ValidationConfig:
 class DnsBackendConfig:
     kind: str = "python"
     massdns_bin: str = "massdns"
+    extra_args: list[str] = field(default_factory=list)
     hashmap_size: int = 2000
     processes: int = 1
     socket_count: int = 1
@@ -215,6 +216,9 @@ def load_settings(path: str | Path | None = None) -> Settings:
             vc.dns_backend.massdns_bin = str(
                 dns_backend.get("massdns_bin", vc.dns_backend.massdns_bin)
             )
+            vc.dns_backend.extra_args = [
+                str(arg) for arg in dns_backend.get("extra_args", vc.dns_backend.extra_args)
+            ]
             vc.dns_backend.hashmap_size = int(
                 dns_backend.get("hashmap_size", vc.dns_backend.hashmap_size)
             )
