@@ -24,6 +24,19 @@ doh_parallelism = 20
 require_tcp_for_dns = false
 require_tls_valid_for_doh = true
 
+[validation.dns_backend]
+kind = "python"
+massdns_bin = "massdns"
+hashmap_size = 2000
+processes = 1
+socket_count = 1
+interval_ms = 0
+predictable = true
+flush = true
+batch_max_queries = 50000
+stderr_log_level = "debug"
+fallback_to_python_on_error = true
+
 [validation.corpus]
 mode = "external"
 path = "../probe-corpus/probe-corpus.json"

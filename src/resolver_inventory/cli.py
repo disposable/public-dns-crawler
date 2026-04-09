@@ -174,6 +174,20 @@ def _apply_validation_parallelism_override(args: argparse.Namespace, settings: S
     settings.validation.parallelism = parallelism
 
 
+def _apply_dns_backend_overrides(args: argparse.Namespace, settings: Settings) -> None:
+    backend = getattr(args, "dns_backend", None)
+    if backend is not None:
+        settings.validation.dns_backend.kind = backend
+
+    massdns_bin = getattr(args, "massdns_bin", None)
+    if massdns_bin is not None:
+        settings.validation.dns_backend.massdns_bin = massdns_bin
+
+    massdns_hashmap_size = getattr(args, "massdns_hashmap_size", None)
+    if massdns_hashmap_size is not None:
+        settings.validation.dns_backend.hashmap_size = massdns_hashmap_size
+
+
 def _candidate_sort_key(candidate) -> tuple[str, str, str, int, str]:
     return (
         candidate.transport,
@@ -230,6 +244,7 @@ def cmd_validate(args: argparse.Namespace) -> int:
     settings = load_settings(args.config)
     _apply_probe_corpus_override(args, settings)
     _apply_validation_parallelism_override(args, settings)
+    _apply_dns_backend_overrides(args, settings)
 
     _github_group("Discovery")
     if args.input:
@@ -448,6 +463,7 @@ def cmd_refresh(args: argparse.Namespace) -> int:
     settings = load_settings(args.config)
     split_json_max_bytes = getattr(args, "split_json_max_bytes", None)
     _apply_probe_corpus_override(args, settings)
+    _apply_dns_backend_overrides(args, settings)
     out_dir = Path(args.output or settings.export.output_dir)
     out_dir.mkdir(parents=True, exist_ok=True)
     filtered_candidates = []
@@ -697,6 +713,23 @@ def _build_parser() -> argparse.ArgumentParser:
         help="Override validation parallelism for this run",
     )
     p_validate.add_argument(
+        "--dns-backend",
+        choices=["python", "massdns"],
+        metavar="KIND",
+        help="Override plain DNS backend for this run",
+    )
+    p_validate.add_argument(
+        "--massdns-bin",
+        metavar="PATH",
+        help="Path to MassDNS binary when --dns-backend=massdns",
+    )
+    p_validate.add_argument(
+        "--massdns-hashmap-size",
+        type=int,
+        metavar="INT",
+        help="Override MassDNS hashmap size when --dns-backend=massdns",
+    )
+    p_validate.add_argument(
         "--progress-every",
         type=int,
         default=100,
@@ -719,6 +752,23 @@ def _build_parser() -> argparse.ArgumentParser:
         "--probe-corpus",
         metavar="FILE",
         help="Load validation probes from a local JSON corpus file",
+    )
+    p_refresh.add_argument(
+        "--dns-backend",
+        choices=["python", "massdns"],
+        metavar="KIND",
+        help="Override plain DNS backend for this run",
+    )
+    p_refresh.add_argument(
+        "--massdns-bin",
+        metavar="PATH",
+        help="Path to MassDNS binary when --dns-backend=massdns",
+    )
+    p_refresh.add_argument(
+        "--massdns-hashmap-size",
+        type=int,
+        metavar="INT",
+        help="Override MassDNS hashmap size when --dns-backend=massdns",
     )
     p_refresh.add_argument(
         "--split-json-max-bytes",

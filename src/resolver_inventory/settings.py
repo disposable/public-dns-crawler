@@ -29,6 +29,22 @@ class ValidationConfig:
     require_tls_valid_for_doh: bool = True
     baseline_resolvers: list[str] = field(default_factory=lambda: ["1.1.1.1", "9.9.9.9", "8.8.8.8"])
     corpus: CorpusConfig = field(default_factory=CorpusConfig)
+    dns_backend: DnsBackendConfig = field(default_factory=lambda: DnsBackendConfig())
+
+
+@dataclass
+class DnsBackendConfig:
+    kind: str = "python"
+    massdns_bin: str = "massdns"
+    hashmap_size: int = 2000
+    processes: int = 1
+    socket_count: int = 1
+    interval_ms: int = 0
+    predictable: bool = True
+    flush: bool = True
+    batch_max_queries: int = 50000
+    stderr_log_level: str = "debug"
+    fallback_to_python_on_error: bool = True
 
 
 @dataclass
@@ -193,6 +209,38 @@ def load_settings(path: str | Path | None = None) -> Settings:
                 c.get("allow_builtin_fallback", vc.corpus.allow_builtin_fallback)
             )
             vc.corpus.strict = bool(c.get("strict", vc.corpus.strict))
+        if "dns_backend" in v:
+            dns_backend = v["dns_backend"]
+            vc.dns_backend.kind = str(dns_backend.get("kind", vc.dns_backend.kind))
+            vc.dns_backend.massdns_bin = str(
+                dns_backend.get("massdns_bin", vc.dns_backend.massdns_bin)
+            )
+            vc.dns_backend.hashmap_size = int(
+                dns_backend.get("hashmap_size", vc.dns_backend.hashmap_size)
+            )
+            vc.dns_backend.processes = int(dns_backend.get("processes", vc.dns_backend.processes))
+            vc.dns_backend.socket_count = int(
+                dns_backend.get("socket_count", vc.dns_backend.socket_count)
+            )
+            vc.dns_backend.interval_ms = int(
+                dns_backend.get("interval_ms", vc.dns_backend.interval_ms)
+            )
+            vc.dns_backend.predictable = bool(
+                dns_backend.get("predictable", vc.dns_backend.predictable)
+            )
+            vc.dns_backend.flush = bool(dns_backend.get("flush", vc.dns_backend.flush))
+            vc.dns_backend.batch_max_queries = int(
+                dns_backend.get("batch_max_queries", vc.dns_backend.batch_max_queries)
+            )
+            vc.dns_backend.stderr_log_level = str(
+                dns_backend.get("stderr_log_level", vc.dns_backend.stderr_log_level)
+            )
+            vc.dns_backend.fallback_to_python_on_error = bool(
+                dns_backend.get(
+                    "fallback_to_python_on_error",
+                    vc.dns_backend.fallback_to_python_on_error,
+                )
+            )
 
     if "scoring" in raw:
         s = raw["scoring"]

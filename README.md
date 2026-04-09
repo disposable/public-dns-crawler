@@ -66,7 +66,7 @@ resolver-inventory export unbound  [--input FILE] [--output FILE]
 
 Global flags: `--config FILE`, `--log-level {DEBUG,INFO,WARNING,ERROR}`.
 
-Validation commands also support `--probe-corpus FILE` and `--validation-parallelism N`. When `--probe-corpus` is provided, the CLI sets `validation.corpus.mode = "external"` and loads probes from that local JSON file.
+Validation commands also support `--probe-corpus FILE`, `--validation-parallelism N`, `--dns-backend {python,massdns}`, `--massdns-bin PATH`, and `--massdns-hashmap-size N`. When `--probe-corpus` is provided, the CLI sets `validation.corpus.mode = "external"` and loads probes from that local JSON file.
 JSON exports are written in compact form and sorted deterministically by endpoint identity to keep diffs stable.
 Use `--split-json-max-bytes N` on `refresh`, `materialize-results`, or `export json` to split large JSON outputs into `.part-XXXX` files.
 
@@ -134,6 +134,19 @@ rounds = 3
 timeout_ms = 2000
 parallelism = 50
 
+[validation.dns_backend]
+kind = "python"                       # default backend; "massdns" is optional
+massdns_bin = "massdns"
+hashmap_size = 2000
+processes = 1
+socket_count = 1
+interval_ms = 0
+predictable = true
+flush = true
+batch_max_queries = 50000
+stderr_log_level = "debug"
+fallback_to_python_on_error = true
+
 [validation.corpus]
 mode = "external"                     # "controlled", "fallback", or "external"
 zone = "dns-test.example.net"         # controlled mode only
@@ -152,6 +165,30 @@ output_dir = "outputs/latest"
 ```
 
 `publicdns_info` accepts an optional `min_reliability` setting. Entries with a lower score are ignored before validation. The default is `0.50`.
+
+### Optional MassDNS backend
+
+Plain DNS validation supports two backends:
+
+- `python` (default): existing dnspython probe path
+- `massdns` (optional): batched subprocess path with streaming stdin/stdout pipes
+
+DoH validation is unchanged and never uses MassDNS.
+
+MassDNS phase-1 routing limitations:
+
+- Only `dns-udp` probes on port `53` are routed to MassDNS.
+- `dns-tcp` and non-53 plain DNS probes automatically use the python backend.
+- `doh` probes always use the existing DoH path.
+- `latency_ms` on MassDNS can have lower fidelity depending on output fields.
+
+Install MassDNS before enabling it:
+
+```bash
+massdns --help
+```
+
+Start with conservative tuning in CI. Increase `hashmap_size` (`-s`) only after validating memory and throughput tradeoffs in your environment.
 
 ### Corpus modes
 

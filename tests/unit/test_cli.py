@@ -9,6 +9,7 @@ from pathlib import Path
 import pytest
 
 from resolver_inventory.cli import (
+    _apply_dns_backend_overrides,
     _apply_probe_corpus_override,
     _build_parser,
     _ValidateProgressReporter,
@@ -49,6 +50,23 @@ class TestCliParser:
         parser = _build_parser()
         args = parser.parse_args(["validate", "--validation-parallelism", "100"])
         assert args.validation_parallelism == 100
+
+    def test_validate_dns_backend_overrides(self) -> None:
+        parser = _build_parser()
+        args = parser.parse_args(
+            [
+                "validate",
+                "--dns-backend",
+                "massdns",
+                "--massdns-bin",
+                "/usr/local/bin/massdns",
+                "--massdns-hashmap-size",
+                "4096",
+            ]
+        )
+        assert args.dns_backend == "massdns"
+        assert args.massdns_bin == "/usr/local/bin/massdns"
+        assert args.massdns_hashmap_size == 4096
 
     def test_validate_progress_every_default(self) -> None:
         parser = _build_parser()
@@ -173,6 +191,22 @@ class TestCliProbeCorpusOverride:
         _apply_probe_corpus_override(args, settings)
         assert settings.validation.corpus.mode == "external"
         assert settings.validation.corpus.path == "tests/fixtures/probe-corpus-valid.json"
+
+    def test_apply_dns_backend_overrides(self) -> None:
+        from resolver_inventory.settings import Settings
+
+        args = argparse.Namespace(
+            dns_backend="massdns",
+            massdns_bin="/tmp/massdns",
+            massdns_hashmap_size=8192,
+        )
+        settings = Settings()
+
+        _apply_dns_backend_overrides(args, settings)
+
+        assert settings.validation.dns_backend.kind == "massdns"
+        assert settings.validation.dns_backend.massdns_bin == "/tmp/massdns"
+        assert settings.validation.dns_backend.hashmap_size == 8192
 
 
 class TestValidateProgressReporter:

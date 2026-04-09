@@ -70,11 +70,65 @@ async def _probe_positive(
         return fail_probe(probe_name, f"timeout_or_error:{exc!s:.80}")
 
     rcode = dns.rcode.to_text(resp.rcode())  # type: ignore[attr-defined]
+    answers = normalize_answer_set(resp, entry.rdtype)
+    return await evaluate_positive_probe_result(
+        entry,
+        probe_name=probe_name,
+        qname=qname,
+        rcode=rcode,
+        answers=answers,
+        latency_ms=ms,
+        timeout_s=timeout_s,
+        baseline_resolvers=baseline_resolvers,
+        baseline_cache=baseline_cache,
+    )
+
+
+async def _probe_nxdomain(
+    entry: CorpusEntry,
+    host: str,
+    port: int,
+    transport: str,
+    timeout_s: float,
+) -> ProbeResult:
+    probe_name = f"{transport}:nxdomain:{entry.label}"
+    qname = render_probe_qname(entry)
+    msg = dns.message.make_query(qname, dns.rdatatype.A)
+    msg.id = 0
+    try:
+        if transport == "dns-udp":
+            resp, ms = await _query_udp(host, port, msg, timeout_s)
+        else:
+            resp, ms = await _query_tcp(host, port, msg, timeout_s)
+    except (TimeoutError, OSError, Exception) as exc:
+        return fail_probe(probe_name, f"timeout_or_error:{exc!s:.80}")
+
+    rcode = dns.rcode.to_text(resp.rcode())  # type: ignore[attr-defined]
+    return evaluate_nxdomain_probe_result(
+        probe_name=probe_name,
+        qname=qname,
+        rcode=rcode,
+        answer_count=len(resp.answer),
+        latency_ms=ms,
+    )
+
+
+async def evaluate_positive_probe_result(
+    entry: CorpusEntry,
+    *,
+    probe_name: str,
+    qname: str,
+    rcode: str,
+    answers: list[str],
+    latency_ms: float | None,
+    timeout_s: float,
+    baseline_resolvers: list[str],
+    baseline_cache: dict[tuple[str, str], list[str]],
+) -> ProbeResult:
     if rcode not in ("NOERROR", "NXDOMAIN"):
         return fail_probe(probe_name, f"unexpected_rcode:{rcode}", {"rcode": rcode})
     if rcode == "NXDOMAIN":
         return fail_probe(probe_name, "unexpected_nxdomain", {"rcode": rcode})
-    answers = normalize_answer_set(resp, entry.rdtype)
     if entry.expected_mode == "exact_rrset":
         expected = normalize_expected_answers(entry.expected_answers, entry.rdtype)
         if answers != expected:
@@ -100,36 +154,30 @@ async def _probe_positive(
                 "answer_mismatch",
                 {"expected": ",".join(baseline), "actual": ",".join(answers)},
             )
-    return ok_probe(probe_name, ms, {"rcode": rcode})
+    details = {"rcode": rcode}
+    if latency_ms is None:
+        return ProbeResult(ok=True, probe=probe_name, latency_ms=None, details=details)
+    return ok_probe(probe_name, latency_ms, details)
 
 
-async def _probe_nxdomain(
-    entry: CorpusEntry,
-    host: str,
-    port: int,
-    transport: str,
-    timeout_s: float,
+def evaluate_nxdomain_probe_result(
+    *,
+    probe_name: str,
+    qname: str,
+    rcode: str,
+    answer_count: int,
+    latency_ms: float | None,
 ) -> ProbeResult:
-    probe_name = f"{transport}:nxdomain:{entry.label}"
-    qname = render_probe_qname(entry)
-    msg = dns.message.make_query(qname, dns.rdatatype.A)
-    msg.id = 0
-    try:
-        if transport == "dns-udp":
-            resp, ms = await _query_udp(host, port, msg, timeout_s)
-        else:
-            resp, ms = await _query_tcp(host, port, msg, timeout_s)
-    except (TimeoutError, OSError, Exception) as exc:
-        return fail_probe(probe_name, f"timeout_or_error:{exc!s:.80}")
-
-    rcode = dns.rcode.to_text(resp.rcode())  # type: ignore[attr-defined]
     if rcode != "NXDOMAIN":
         return fail_probe(
             probe_name,
             "nxdomain_spoofing",
-            {"rcode": rcode, "answers": str(len(resp.answer)), "qname": qname},
+            {"rcode": rcode, "answers": str(answer_count), "qname": qname},
         )
-    return ok_probe(probe_name, ms, {"rcode": rcode})
+    details = {"rcode": rcode}
+    if latency_ms is None:
+        return ProbeResult(ok=True, probe=probe_name, latency_ms=None, details=details)
+    return ok_probe(probe_name, latency_ms, details)
 
 
 async def validate_dns_candidate(

@@ -29,6 +29,28 @@ class TestLoadSettings:
         assert s.validation.timeout_ms == 3000
         assert s.validation.parallelism == 20
 
+    def test_load_validation_dns_backend_config(self, tmp_path: Path) -> None:
+        cfg = tmp_path / "config.toml"
+        cfg.write_bytes(
+            b'[validation.dns_backend]\nkind = "massdns"\n'
+            b'massdns_bin = "/usr/bin/massdns"\n'
+            b"hashmap_size = 4096\nprocesses = 2\nsocket_count = 4\ninterval_ms = 3\n"
+            b"predictable = false\nflush = false\nbatch_max_queries = 1111\n"
+            b'stderr_log_level = "warning"\nfallback_to_python_on_error = false\n'
+        )
+        s = load_settings(cfg)
+        assert s.validation.dns_backend.kind == "massdns"
+        assert s.validation.dns_backend.massdns_bin == "/usr/bin/massdns"
+        assert s.validation.dns_backend.hashmap_size == 4096
+        assert s.validation.dns_backend.processes == 2
+        assert s.validation.dns_backend.socket_count == 4
+        assert s.validation.dns_backend.interval_ms == 3
+        assert s.validation.dns_backend.predictable is False
+        assert s.validation.dns_backend.flush is False
+        assert s.validation.dns_backend.batch_max_queries == 1111
+        assert s.validation.dns_backend.stderr_log_level == "warning"
+        assert s.validation.dns_backend.fallback_to_python_on_error is False
+
     def test_load_scoring_config(self, tmp_path: Path) -> None:
         cfg = tmp_path / "config.toml"
         cfg.write_bytes(b"[scoring]\naccept_min_score = 75\ncandidate_min_score = 50\n")
