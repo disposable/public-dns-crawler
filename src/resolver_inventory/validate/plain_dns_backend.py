@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
 from typing import Literal, Protocol
 
@@ -48,6 +49,9 @@ class PlainDnsBatchRunner(Protocol):
     ) -> list[PlainDnsProbeExecution]: ...
 
 
+PlainDnsExecutionCallback = Callable[[PlainDnsProbeExecution], Awaitable[None]]
+
+
 def supports_massdns_phase1(spec: PlainDnsProbeSpec) -> bool:
     return spec.candidate_transport == "dns-udp" and spec.port == 53
 
@@ -59,14 +63,15 @@ async def run_python_plain_dns_batch(
     baseline_resolvers: list[str],
     baseline_cache: dict[tuple[str, str], list[str]],
     parallelism: int,
+    on_execution: PlainDnsExecutionCallback | None = None,
 ) -> list[PlainDnsProbeExecution]:
     if not specs:
         return []
 
     semaphore = asyncio.Semaphore(max(1, parallelism))
-    out: list[PlainDnsProbeExecution | None] = [None] * len(specs)
+    out: list[PlainDnsProbeExecution] = []
 
-    async def _run_at(index: int, spec: PlainDnsProbeSpec) -> None:
+    async def _run_one(spec: PlainDnsProbeSpec) -> PlainDnsProbeExecution:
         async with semaphore:
             if spec.kind == "positive":
                 result = await _probe_positive(
@@ -86,10 +91,15 @@ async def run_python_plain_dns_batch(
                     spec.candidate_transport,
                     timeout_s,
                 )
-            out[index] = PlainDnsProbeExecution(spec=spec, result=result)
+            return PlainDnsProbeExecution(spec=spec, result=result)
 
-    await asyncio.gather(*(_run_at(index, spec) for index, spec in enumerate(specs)))
-    return [item for item in out if item is not None]
+    for future in asyncio.as_completed([_run_one(spec) for spec in specs]):
+        execution = await future
+        if on_execution is not None:
+            await on_execution(execution)
+        else:
+            out.append(execution)
+    return out
 
 
 def build_python_backend_error_probe(

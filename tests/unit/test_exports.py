@@ -2,11 +2,19 @@
 
 from __future__ import annotations
 
+import json
+from pathlib import Path
+
 from resolver_inventory.export.dnsdist import export_dnsdist
-from resolver_inventory.export.json import export_filtered_json, export_json
+from resolver_inventory.export.json import (
+    StreamingJsonArrayWriter,
+    export_filtered_json,
+    export_json,
+)
 from resolver_inventory.export.text import export_text
 from resolver_inventory.export.unbound import export_unbound
 from resolver_inventory.models import Candidate, FilteredCandidate, ProbeResult, ValidationResult
+from resolver_inventory.serialization import validation_result_to_dict_export
 
 
 def _dns_result(
@@ -165,6 +173,29 @@ class TestJsonExport:
         assert out.exists()
         data = json.loads(out.read_text())
         assert len(data) == 1
+
+    def test_streaming_writer_writes_single_json_array(self, tmp_path: object) -> None:
+        out = Path(str(tmp_path)) / "stream.json"
+        writer = StreamingJsonArrayWriter(out)
+        writer.write_record(validation_result_to_dict_export(_dns_result(host="192.0.2.10")))
+        writer.write_record(validation_result_to_dict_export(_dns_result(host="192.0.2.11")))
+        writer.close()
+
+        data = json.loads(out.read_text())
+        assert [record["candidate"]["host"] for record in data] == ["192.0.2.10", "192.0.2.11"]
+
+    def test_streaming_writer_splits_output_into_parts(self, tmp_path: object) -> None:
+        out = Path(str(tmp_path)) / "stream.json"
+        writer = StreamingJsonArrayWriter(out, max_file_bytes=150)
+        try:
+            for host in ["192.0.2.10", "192.0.2.11", "192.0.2.12", "192.0.2.13"]:
+                writer.write_record(validation_result_to_dict_export(_dns_result(host=host)))
+        finally:
+            writer.close()
+
+        assert not out.exists()
+        parts = sorted(out.parent.glob("stream.part-*.json"))
+        assert len(parts) >= 2
 
     def test_filtered_export_contains_reason_and_detail(self) -> None:
         import json

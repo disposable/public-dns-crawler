@@ -10,7 +10,11 @@ import pytest
 from resolver_inventory.cli import cmd_refresh
 from resolver_inventory.models import Candidate, DiscoveryResult, FilteredCandidate, ProbeResult
 from resolver_inventory.settings import Settings
-from resolver_inventory.validate import ValidationProgress, validate_candidates
+from resolver_inventory.validate import (
+    ValidationProgress,
+    validate_candidates,
+    validate_candidates_stream,
+)
 from tests.fixtures.dns_authority import AuthoritativeDnsFixture
 
 pytestmark = pytest.mark.integration
@@ -74,24 +78,40 @@ class TestValidateCandidatesCorpusLifecycle:
             load_calls.append("called")
             return original_build_corpus(config)
 
-        async def fake_validate_dns_candidate(
-            candidate: Candidate,
-            corpus: object,
+        async def fake_run_plain_dns_specs(
+            specs: list[object],
+            settings: object,
             *,
-            timeout_s: float = 2.0,
-            rounds: int = 1,
-            baseline_resolvers: list[str] | None = None,
-            baseline_cache: dict[tuple[str, str], list[str]] | None = None,
-        ) -> list[ProbeResult]:
-            return [ProbeResult(ok=True, probe=f"fake:{candidate.host}", latency_ms=1.0)]
+            timeout_s: float,
+            baseline_resolvers: list[str],
+            baseline_cache: dict[tuple[str, str], list[str]],
+            on_execution=None,
+        ) -> list[object]:
+            assert on_execution is not None
+            for spec in specs:
+                await on_execution(
+                    type(
+                        "Exec",
+                        (),
+                        {
+                            "spec": spec,
+                            "result": ProbeResult(
+                                ok=True,
+                                probe=f"fake:{spec.candidate_idx}",
+                                latency_ms=1.0,
+                            ),
+                        },
+                    )()
+                )
+            return []
 
         monkeypatch.setattr(
             "resolver_inventory.validate.build_corpus",
             spy_build_corpus,
         )
         monkeypatch.setattr(
-            "resolver_inventory.validate.validate_dns_candidate",
-            fake_validate_dns_candidate,
+            "resolver_inventory.validate._run_plain_dns_specs",
+            fake_run_plain_dns_specs,
         )
 
         results = validate_candidates(candidates, settings)
@@ -106,20 +126,36 @@ class TestValidateCandidatesCorpusLifecycle:
         candidates = [_candidate("127.0.0.1", 53), _candidate("127.0.0.1", 54)]
         events: list[ValidationProgress] = []
 
-        async def fake_validate_dns_candidate(
-            candidate: Candidate,
-            corpus: object,
+        async def fake_run_plain_dns_specs(
+            specs: list[object],
+            settings: object,
             *,
-            timeout_s: float = 2.0,
-            rounds: int = 1,
-            baseline_resolvers: list[str] | None = None,
-            baseline_cache: dict[tuple[str, str], list[str]] | None = None,
-        ) -> list[ProbeResult]:
-            return [ProbeResult(ok=True, probe=f"fake:{candidate.host}", latency_ms=1.0)]
+            timeout_s: float,
+            baseline_resolvers: list[str],
+            baseline_cache: dict[tuple[str, str], list[str]],
+            on_execution=None,
+        ) -> list[object]:
+            assert on_execution is not None
+            for spec in specs:
+                await on_execution(
+                    type(
+                        "Exec",
+                        (),
+                        {
+                            "spec": spec,
+                            "result": ProbeResult(
+                                ok=True,
+                                probe=f"fake:{spec.candidate_idx}",
+                                latency_ms=1.0,
+                            ),
+                        },
+                    )()
+                )
+            return []
 
         monkeypatch.setattr(
-            "resolver_inventory.validate.validate_dns_candidate",
-            fake_validate_dns_candidate,
+            "resolver_inventory.validate._run_plain_dns_specs",
+            fake_run_plain_dns_specs,
         )
 
         results = validate_candidates(candidates, settings, progress_callback=events.append)
@@ -131,6 +167,54 @@ class TestValidateCandidatesCorpusLifecycle:
             "dns-udp:127.0.0.1:53",
             "dns-udp:127.0.0.1:54",
         ]
+
+    def test_validate_candidates_stream_emits_in_input_order(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        settings = _settings_for_mode("external", path="tests/fixtures/probe-corpus-valid.json")
+        settings.validation.parallelism = 1
+        candidates = [_candidate("127.0.0.1", 54), _candidate("127.0.0.1", 53)]
+        seen: list[str] = []
+
+        async def fake_run_plain_dns_specs(
+            specs: list[object],
+            settings: object,
+            *,
+            timeout_s: float,
+            baseline_resolvers: list[str],
+            baseline_cache: dict[tuple[str, str], list[str]],
+            on_execution=None,
+        ) -> list[object]:
+            assert on_execution is not None
+            for spec in reversed(specs):
+                await on_execution(
+                    type(
+                        "Exec",
+                        (),
+                        {
+                            "spec": spec,
+                            "result": ProbeResult(
+                                ok=True,
+                                probe=f"fake:{spec.candidate_idx}",
+                                latency_ms=1.0,
+                            ),
+                        },
+                    )()
+                )
+            return []
+
+        monkeypatch.setattr(
+            "resolver_inventory.validate._run_plain_dns_specs",
+            fake_run_plain_dns_specs,
+        )
+
+        validate_candidates_stream(
+            candidates,
+            lambda result: seen.append(f"{result.candidate.host}:{result.candidate.port}"),
+            settings,
+        )
+
+        assert seen == ["127.0.0.1:54", "127.0.0.1:53"]
 
     def test_strict_external_mode_fails_on_invalid_schema(self) -> None:
         settings = _settings_for_mode(

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+from collections.abc import Iterable
 from pathlib import Path
 
 from resolver_inventory.models import FilteredCandidate, Status, ValidationResult
@@ -89,6 +90,108 @@ def _write_chunked_json(path: Path, payload: list[dict], max_file_bytes: int) ->
     for index, chunk in enumerate(chunks, start=1):
         split_path = _split_output_path(path, index)
         split_path.write_text(f"[{b','.join(chunk).decode('utf-8')}]", encoding="utf-8")
+
+
+class StreamingJsonArrayWriter:
+    def __init__(self, path: Path, *, max_file_bytes: int | None = None) -> None:
+        self.path = path
+        self.max_file_bytes = max_file_bytes
+        self.part_index = 1
+        self.current_path = path
+        self.handle = None
+        self.current_size = 2
+        self.records_written = 0
+        self.using_split_paths = False
+
+    def write_record(self, record: dict) -> None:
+        encoded = json.dumps(record, ensure_ascii=False, separators=(",", ":")).encode("utf-8")
+        if self.handle is None:
+            self._open_current()
+        if (
+            self.max_file_bytes is not None
+            and self.records_written > 0
+            and self.current_size + 1 + len(encoded) > self.max_file_bytes
+        ):
+            self._rotate()
+        assert self.handle is not None
+        if self.records_written > 0:
+            self.handle.write(",")
+            self.current_size += 1
+        self.handle.write(encoded.decode("utf-8"))
+        self.current_size += len(encoded)
+        self.records_written += 1
+
+    def close(self) -> None:
+        if self.handle is None:
+            self.path.write_text("[]", encoding="utf-8")
+            return
+        self.handle.write("]")
+        self.handle.close()
+        self.handle = None
+
+    def _open_current(self) -> None:
+        self.current_path.parent.mkdir(parents=True, exist_ok=True)
+        self.handle = self.current_path.open("w", encoding="utf-8")
+        self.handle.write("[")
+        self.current_size = 2
+        self.records_written = 0
+
+    def _rotate(self) -> None:
+        assert self.handle is not None
+        self.handle.write("]")
+        self.handle.close()
+        if not self.using_split_paths:
+            first_part = _split_output_path(self.path, 1)
+            self.current_path.replace(first_part)
+            self.using_split_paths = True
+        self.part_index += 1
+        self.current_path = _split_output_path(self.path, self.part_index)
+        self._open_current()
+
+
+def stream_export_json(
+    results: Iterable[ValidationResult],
+    *,
+    statuses: set[Status] | None = None,
+    rejected_failed_only: bool = False,
+    path: str | Path,
+) -> None:
+    writer = StreamingJsonArrayWriter(Path(path))
+    try:
+        for result in results:
+            if statuses is not None and result.status not in statuses:
+                continue
+            writer.write_record(
+                validation_result_to_dict_export(
+                    result,
+                    rejected_failed_only=rejected_failed_only,
+                )
+            )
+    finally:
+        writer.close()
+
+
+def stream_export_json_chunked(
+    results: Iterable[ValidationResult],
+    *,
+    statuses: set[Status] | None = None,
+    rejected_failed_only: bool = False,
+    path: str | Path,
+    max_file_bytes: int,
+) -> None:
+    writer = StreamingJsonArrayWriter(Path(path), max_file_bytes=max_file_bytes)
+    try:
+        for result in results:
+            if statuses is not None and result.status not in statuses:
+                continue
+            writer.write_record(
+                validation_result_to_dict_export(
+                    result,
+                    rejected_failed_only=rejected_failed_only,
+                )
+            )
+    finally:
+        writer.close()
 
 
 def export_json(

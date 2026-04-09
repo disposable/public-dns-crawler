@@ -9,8 +9,7 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
-import random
-from collections.abc import Callable
+from collections.abc import Callable, Iterator
 from dataclasses import dataclass
 from typing import Any
 
@@ -43,6 +42,7 @@ from resolver_inventory.validate.scorer import score
 logger = get_logger(__name__)
 
 ProgressCallback = Callable[["ValidationProgress"], None]
+ValidationResultCallback = Callable[[ValidationResult], None]
 
 
 @dataclass(frozen=True, slots=True)
@@ -67,21 +67,29 @@ class _DoHProbeTask:
 class _ProbeWorkload:
     plain_specs: list[PlainDnsProbeSpec]
     doh_tasks: list[_DoHProbeTask]
-    probes_expected: list[int]
-    total_probes: int
+    probes_expected: dict[int, int]
+
+
+def _candidate_probe_count(candidate: Candidate, corpus: Corpus, rounds: int) -> int:
+    round_probes = len(corpus.positive) + len(corpus.nxdomain)
+    if candidate.transport == "doh":
+        return 1 + (rounds * round_probes)
+    return rounds * round_probes
 
 
 def _build_probe_workload(
     candidates: list[Candidate],
     corpus: Corpus,
     rounds: int,
+    *,
+    start_idx: int,
 ) -> _ProbeWorkload:
     plain_specs: list[PlainDnsProbeSpec] = []
     doh_tasks: list[_DoHProbeTask] = []
-    probes_expected: list[int] = []
-    total = 0
+    probes_expected: dict[int, int] = {}
 
-    for idx, candidate in enumerate(candidates):
+    for offset, candidate in enumerate(candidates):
+        idx = start_idx + offset
         count = 0
         if candidate.transport == "doh":
             doh_tasks.append(_DoHProbeTask("doh_tls", idx, candidate, None))
@@ -140,15 +148,12 @@ def _build_probe_workload(
                     )
                     count += 1
                     seq += 1
-        probes_expected.append(count)
-        total += count
+        probes_expected[idx] = count
 
-    random.shuffle(doh_tasks)
     return _ProbeWorkload(
         plain_specs=plain_specs,
         doh_tasks=doh_tasks,
         probes_expected=probes_expected,
-        total_probes=total,
     )
 
 
@@ -159,6 +164,7 @@ async def _run_plain_dns_specs(
     timeout_s: float,
     baseline_resolvers: list[str],
     baseline_cache: dict[tuple[str, str], list[str]],
+    on_execution: Callable[[PlainDnsProbeExecution], Any] | None = None,
 ) -> list[PlainDnsProbeExecution]:
     if not specs:
         return []
@@ -172,6 +178,7 @@ async def _run_plain_dns_specs(
             baseline_resolvers=baseline_resolvers,
             baseline_cache=baseline_cache,
             parallelism=settings.validation.parallelism,
+            on_execution=on_execution,
         )
 
     unsupported: list[PlainDnsProbeSpec] = []
@@ -199,6 +206,7 @@ async def _run_plain_dns_specs(
                 baseline_resolvers=baseline_resolvers,
                 baseline_cache=baseline_cache,
                 parallelism=settings.validation.parallelism,
+                on_execution=on_execution,
             )
         )
 
@@ -218,6 +226,7 @@ async def _run_plain_dns_specs(
                 timeout_s=timeout_s,
                 baseline_resolvers=baseline_resolvers,
                 baseline_cache=baseline_cache,
+                on_execution=on_execution,
             )
             logger.debug(
                 (
@@ -232,27 +241,6 @@ async def _run_plain_dns_specs(
                 metrics.unmatched_results,
                 metrics.exit_code,
             )
-            if metrics.exit_code != 0 and backend.fallback_to_python_on_error:
-                unmatched = [
-                    execution.spec
-                    for execution in batch_results
-                    if execution.result.error == "timeout_or_error:massdns_unmatched"
-                ]
-                if unmatched:
-                    python_fallback_probes += len(unmatched)
-                    fallback_results = await run_python_plain_dns_batch(
-                        unmatched,
-                        timeout_s=timeout_s,
-                        baseline_resolvers=baseline_resolvers,
-                        baseline_cache=baseline_cache,
-                        parallelism=settings.validation.parallelism,
-                    )
-                    by_probe_id = {result.spec.probe_id: result for result in fallback_results}
-                    replaced: list[PlainDnsProbeExecution] = []
-                    for execution in batch_results:
-                        replacement = by_probe_id.get(execution.spec.probe_id)
-                        replaced.append(replacement or execution)
-                    batch_results = replaced
             out.extend(batch_results)
             batches_succeeded += 1
         except FileNotFoundError as exc:
@@ -267,6 +255,7 @@ async def _run_plain_dns_specs(
                     baseline_resolvers=baseline_resolvers,
                     baseline_cache=baseline_cache,
                     parallelism=settings.validation.parallelism,
+                    on_execution=on_execution,
                 )
             )
         except Exception:
@@ -281,11 +270,12 @@ async def _run_plain_dns_specs(
                     baseline_resolvers=baseline_resolvers,
                     baseline_cache=baseline_cache,
                     parallelism=settings.validation.parallelism,
+                    on_execution=on_execution,
                 )
             )
 
     logger.debug(
-        ("massdns summary: batches_succeeded=%d batches_failed=%d python_fallback_probes=%d"),
+        "massdns summary: batches_succeeded=%d batches_failed=%d python_fallback_probes=%d",
         batches_succeeded,
         batches_failed,
         python_fallback_probes,
@@ -325,64 +315,89 @@ async def _execute_doh_probe(
     return fail_probe(f"unknown:{task.kind}", "internal_error")
 
 
-async def _run_validation(
-    candidates: list[Candidate],
+async def _run_window(
+    window_candidates: list[Candidate],
     settings: Settings,
     corpus: Corpus,
     baseline_cache: dict[tuple[str, str], list[str]],
     *,
-    progress_callback: ProgressCallback | None = None,
-) -> list[ValidationResult]:
-    if not candidates:
-        return []
-
+    start_idx: int,
+    total_candidates: int,
+    total_probes: int,
+    completed_before: int,
+    probes_done_before: int,
+    emit_result: ValidationResultCallback,
+    progress_callback: ProgressCallback | None,
+) -> tuple[int, int]:
     timeout_s = settings.validation.timeout_ms / 1000.0
     rounds = settings.validation.rounds
     baseline_resolvers = settings.validation.baseline_resolvers
 
-    workload = _build_probe_workload(candidates, corpus, rounds)
-    collected: list[list[ProbeResult]] = [[] for _ in candidates]
-    probe_counts: list[int] = [0] * len(candidates)
-    results: list[ValidationResult | None] = [None] * len(candidates)
-    completed_count = 0
+    workload = _build_probe_workload(
+        window_candidates,
+        corpus,
+        rounds,
+        start_idx=start_idx,
+    )
+    collected: dict[int, list[ProbeResult]] = {
+        start_idx + offset: [] for offset in range(len(window_candidates))
+    }
+    probe_counts: dict[int, int] = {idx: 0 for idx in collected}
+    ready_results: dict[int, ValidationResult] = {}
+    completed_count = completed_before
+    probes_done = probes_done_before
+    next_emit_idx = start_idx
 
-    def _record_probe(candidate_idx: int, result: ProbeResult) -> None:
-        nonlocal completed_count
-        collected[candidate_idx].append(result)
-        probe_counts[candidate_idx] += 1
-        if (
-            probe_counts[candidate_idx] == workload.probes_expected[candidate_idx]
-            and results[candidate_idx] is None
-        ):
-            validation_result = score(candidates[candidate_idx], collected[candidate_idx], settings)
-            results[candidate_idx] = validation_result
+    def _candidate_at(global_idx: int) -> Candidate:
+        return window_candidates[global_idx - start_idx]
+
+    def _emit_ready() -> None:
+        nonlocal next_emit_idx, completed_count
+        while next_emit_idx in ready_results:
+            result = ready_results.pop(next_emit_idx)
+            emit_result(result)
             completed_count += 1
             if progress_callback is not None:
                 progress_callback(
                     ValidationProgress(
                         completed=completed_count,
-                        total=len(candidates),
-                        candidate=candidates[candidate_idx],
-                        result=validation_result,
-                        probes_done=sum(probe_counts),
-                        probes_total=workload.total_probes,
+                        total=total_candidates,
+                        candidate=result.candidate,
+                        result=result,
+                        probes_done=probes_done,
+                        probes_total=total_probes,
                     )
                 )
+            next_emit_idx += 1
 
-    plain_results = await _run_plain_dns_specs(
+    async def _record_probe(candidate_idx: int, result: ProbeResult) -> None:
+        nonlocal probes_done
+        collected[candidate_idx].append(result)
+        probe_counts[candidate_idx] += 1
+        probes_done += 1
+        if probe_counts[candidate_idx] == workload.probes_expected[candidate_idx]:
+            candidate = _candidate_at(candidate_idx)
+            candidate_probes = collected.pop(candidate_idx)
+            probe_counts.pop(candidate_idx, None)
+            ready_results[candidate_idx] = score(candidate, candidate_probes, settings)
+            _emit_ready()
+
+    async def _record_execution(execution: PlainDnsProbeExecution) -> None:
+        await _record_probe(execution.spec.candidate_idx, execution.result)
+
+    await _run_plain_dns_specs(
         workload.plain_specs,
         settings,
         timeout_s=timeout_s,
         baseline_resolvers=baseline_resolvers,
         baseline_cache=baseline_cache,
+        on_execution=_record_execution,
     )
-    for execution in plain_results:
-        _record_probe(execution.spec.candidate_idx, execution.result)
 
     doh_clients: dict[int, Any] = {}
-    for idx, candidate in enumerate(candidates):
+    for offset, candidate in enumerate(window_candidates):
         if candidate.transport == "doh":
-            doh_clients[idx] = build_doh_client(timeout_s=timeout_s)
+            doh_clients[start_idx + offset] = build_doh_client(timeout_s=timeout_s)
     if doh_clients:
 
         async def _warmup(client: Any, url: str) -> None:
@@ -393,7 +408,10 @@ async def _run_validation(
                 pass
 
         await asyncio.gather(
-            *(_warmup(doh_clients[idx], candidates[idx].endpoint_url or "") for idx in doh_clients)
+            *(
+                _warmup(doh_clients[idx], _candidate_at(idx).endpoint_url or "")
+                for idx in doh_clients
+            )
         )
 
     queue: asyncio.Queue[_DoHProbeTask] = asyncio.Queue()
@@ -414,7 +432,7 @@ async def _run_validation(
                     baseline_cache,
                     doh_clients,
                 )
-                _record_probe(task.candidate_idx, result)
+                await _record_probe(task.candidate_idx, result)
             finally:
                 queue.task_done()
 
@@ -425,9 +443,9 @@ async def _run_validation(
                 progress_callback(
                     ValidationProgress(
                         completed=completed_count,
-                        total=len(candidates),
-                        probes_done=sum(probe_counts),
-                        probes_total=workload.total_probes,
+                        total=total_candidates,
+                        probes_done=probes_done,
+                        probes_total=total_probes,
                     )
                 )
 
@@ -448,38 +466,62 @@ async def _run_validation(
         for client in doh_clients.values():
             await client.aclose()
 
-    for idx, result in enumerate(results):
-        if result is None:
-            result = score(candidates[idx], collected[idx], settings)
-            results[idx] = result
-            completed_count += 1
-            if progress_callback is not None:
-                progress_callback(
-                    ValidationProgress(
-                        completed=completed_count,
-                        total=len(candidates),
-                        candidate=candidates[idx],
-                        result=result,
-                        probes_done=sum(probe_counts),
-                        probes_total=workload.total_probes,
-                    )
-                )
-
-    return [item for item in results if item is not None]
+    for candidate_idx in sorted(collected):
+        candidate = _candidate_at(candidate_idx)
+        ready_results[candidate_idx] = score(candidate, collected[candidate_idx], settings)
+    _emit_ready()
+    return completed_count, probes_done
 
 
-def validate_candidates(
+async def _validate_candidates_async(
     candidates: list[Candidate],
+    settings: Settings,
+    corpus: Corpus,
+    baseline_cache: dict[tuple[str, str], list[str]],
+    *,
+    emit_result: ValidationResultCallback,
+    progress_callback: ProgressCallback | None,
+) -> None:
+    if not candidates:
+        return
+
+    window_size = max(1, settings.validation.parallelism)
+    rounds = settings.validation.rounds
+    total_probes = sum(
+        _candidate_probe_count(candidate, corpus, rounds) for candidate in candidates
+    )
+    completed_count = 0
+    probes_done = 0
+
+    for start_idx in range(0, len(candidates), window_size):
+        window = candidates[start_idx : start_idx + window_size]
+        completed_count, probes_done = await _run_window(
+            window,
+            settings,
+            corpus,
+            baseline_cache,
+            start_idx=start_idx,
+            total_candidates=len(candidates),
+            total_probes=total_probes,
+            completed_before=completed_count,
+            probes_done_before=probes_done,
+            emit_result=emit_result,
+            progress_callback=progress_callback,
+        )
+
+
+def validate_candidates_stream(
+    candidates: list[Candidate],
+    emit_result: ValidationResultCallback,
     settings: Settings | None = None,
     progress_callback: ProgressCallback | None = None,
-) -> list[ValidationResult]:
-    """Run all validation probes against every candidate. Synchronous entry point."""
+) -> None:
     if settings is None:
         from resolver_inventory.settings import Settings as S
 
         settings = S()
 
-    async def _run() -> list[ValidationResult]:
+    async def _run() -> None:
         corpus = build_corpus(settings.validation.corpus)
         baseline_cache: dict[tuple[str, str], list[str]] = {}
         timeout_s = settings.validation.timeout_ms / 1000.0
@@ -495,12 +537,37 @@ def validate_candidates(
                         baseline_cache,
                     )
 
-        return await _run_validation(
+        await _validate_candidates_async(
             candidates,
             settings,
             corpus,
             baseline_cache,
+            emit_result=emit_result,
             progress_callback=progress_callback,
         )
 
-    return asyncio.run(_run())
+    asyncio.run(_run())
+
+
+def validate_candidates_iter(
+    candidates: list[Candidate],
+    settings: Settings | None = None,
+    progress_callback: ProgressCallback | None = None,
+) -> Iterator[ValidationResult]:
+    results: list[ValidationResult] = []
+    validate_candidates_stream(
+        candidates,
+        lambda result: results.append(result),
+        settings=settings,
+        progress_callback=progress_callback,
+    )
+    yield from results
+
+
+def validate_candidates(
+    candidates: list[Candidate],
+    settings: Settings | None = None,
+    progress_callback: ProgressCallback | None = None,
+) -> list[ValidationResult]:
+    """Run all validation probes against every candidate. Synchronous entry point."""
+    return list(validate_candidates_iter(candidates, settings, progress_callback))

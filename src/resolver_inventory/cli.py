@@ -17,6 +17,7 @@ from resolver_inventory.util.logging import configure_logging, get_logger
 logger = get_logger(__name__)
 
 if TYPE_CHECKING:
+    from resolver_inventory.models import ValidationResult
     from resolver_inventory.settings import Settings
     from resolver_inventory.validate import ValidationProgress
 
@@ -233,13 +234,16 @@ def cmd_discover(args: argparse.Namespace) -> int:
 
 
 def cmd_validate(args: argparse.Namespace) -> int:
-    from resolver_inventory.export.json import export_json
+    from resolver_inventory.export.json import (
+        StreamingJsonArrayWriter,
+        validation_result_to_dict_export,
+    )
     from resolver_inventory.normalize.dns import normalize_dns_candidates
     from resolver_inventory.normalize.doh import normalize_doh_candidates
     from resolver_inventory.serialization import candidate_from_dict, load_json_list
     from resolver_inventory.settings import load_settings
     from resolver_inventory.sources import discover_candidates
-    from resolver_inventory.validate import validate_candidates
+    from resolver_inventory.validate import validate_candidates_stream
 
     settings = load_settings(args.config)
     _apply_probe_corpus_override(args, settings)
@@ -255,6 +259,7 @@ def cmd_validate(args: argparse.Namespace) -> int:
         candidates = normalize_dns_candidates(raw_candidates) + normalize_doh_candidates(
             raw_candidates
         )
+        candidates.sort(key=_candidate_sort_key)
         logger.info("Discovered %d normalized candidates", len(candidates))
     _github_endgroup()
 
@@ -268,16 +273,40 @@ def cmd_validate(args: argparse.Namespace) -> int:
         every=args.progress_every,
     )
     progress.emit_start()
-    results = validate_candidates(
-        candidates,
-        settings,
-        progress_callback=progress.callback,
-    )
-    progress.emit_done()
+    out_path = args.output or "outputs/validated.json"
+    split_json_max_bytes = getattr(args, "split_json_max_bytes", None)
+    accepted = 0
+    candidate_count = 0
+    rejected = 0
+    if split_json_max_bytes is not None and split_json_max_bytes < 3:
+        raise ValueError("--split-json-max-bytes must be at least 3")
+    writer = StreamingJsonArrayWriter(Path(out_path), max_file_bytes=split_json_max_bytes)
 
-    accepted = sum(1 for r in results if r.status == "accepted")
-    candidate_count = sum(1 for r in results if r.status == "candidate")
-    rejected = sum(1 for r in results if r.status == "rejected")
+    def _handle_result(result: ValidationResult) -> None:
+        nonlocal accepted, candidate_count, rejected
+        if result.status == "accepted":
+            accepted += 1
+        elif result.status == "candidate":
+            candidate_count += 1
+        else:
+            rejected += 1
+        writer.write_record(
+            validation_result_to_dict_export(
+                result,
+                rejected_failed_only=True,
+            )
+        )
+
+    try:
+        validate_candidates_stream(
+            candidates,
+            _handle_result,
+            settings,
+            progress_callback=progress.callback,
+        )
+    finally:
+        writer.close()
+    progress.emit_done()
     logger.info(
         "Results: %d accepted, %d candidate, %d rejected",
         accepted,
@@ -289,21 +318,13 @@ def cmd_validate(args: argparse.Namespace) -> int:
     _github_output("results_accepted", str(accepted))
     _github_output("results_candidate", str(candidate_count))
     _github_output("results_rejected", str(rejected))
-    _github_output("results_total", str(len(results)))
+    _github_output("results_total", str(accepted + candidate_count + rejected))
     _github_notice(
         f"Validation complete: {accepted} accepted, "
         f"{candidate_count} candidate, {rejected} rejected"
     )
 
     _github_group("Export")
-    out_path = args.output or "outputs/validated.json"
-    export_json(
-        results,
-        accepted_only=False,
-        rejected_failed_only=True,
-        max_file_bytes=getattr(args, "split_json_max_bytes", None),
-        path=out_path,
-    )
     logger.info("Wrote results to %s", out_path)
     _github_output("output_path", str(Path(out_path).resolve()))
     _github_endgroup()

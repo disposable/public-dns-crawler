@@ -19,7 +19,12 @@ from resolver_inventory.validate.dns_plain import (
     evaluate_nxdomain_probe_result,
     evaluate_positive_probe_result,
 )
-from resolver_inventory.validate.plain_dns_backend import PlainDnsProbeExecution, PlainDnsProbeSpec
+from resolver_inventory.validate.plain_dns_backend import (
+    PlainDnsExecutionCallback,
+    PlainDnsProbeExecution,
+    PlainDnsProbeSpec,
+    run_python_plain_dns_batch,
+)
 
 logger = get_logger(__name__)
 
@@ -275,6 +280,7 @@ async def run_massdns_batch(
     timeout_s: float,
     baseline_resolvers: list[str],
     baseline_cache: dict[tuple[str, str], list[str]],
+    on_execution: PlainDnsExecutionCallback | None = None,
 ) -> tuple[list[PlainDnsProbeExecution], MassDnsBatchMetrics]:
     if not specs:
         return [], MassDnsBatchMetrics()
@@ -336,6 +342,7 @@ async def run_massdns_batch(
             os.unlink(resolver_path)
 
     executions: list[PlainDnsProbeExecution] = []
+    yielded_count = 0
     for spec, parsed in matched:
         result = await normalize_massdns_result(
             spec,
@@ -344,23 +351,43 @@ async def run_massdns_batch(
             baseline_resolvers=baseline_resolvers,
             baseline_cache=baseline_cache,
         )
-        executions.append(PlainDnsProbeExecution(spec=spec, result=result))
+        execution = PlainDnsProbeExecution(spec=spec, result=result)
+        yielded_count += 1
+        if on_execution is not None:
+            await on_execution(execution)
+        else:
+            executions.append(execution)
 
-    for pending in pending_by_key.values():
-        for spec in pending:
-            executions.append(
-                PlainDnsProbeExecution(
+    unresolved = [spec for pending in pending_by_key.values() for spec in pending]
+    if return_code != 0 and not yielded_count:
+        raise RuntimeError(f"massdns exited with code {return_code}")
+
+    if unresolved:
+        if return_code != 0 and config.fallback_to_python_on_error:
+            fallback_results = await run_python_plain_dns_batch(
+                unresolved,
+                timeout_s=timeout_s,
+                baseline_resolvers=baseline_resolvers,
+                baseline_cache=baseline_cache,
+                parallelism=1,
+                on_execution=on_execution,
+            )
+            if on_execution is None:
+                executions.extend(fallback_results)
+        else:
+            for spec in unresolved:
+                execution = PlainDnsProbeExecution(
                     spec=spec,
                     result=fail_probe(spec.probe_name, "timeout_or_error:massdns_unmatched"),
                 )
-            )
-
-    if return_code != 0 and not matched:
-        raise RuntimeError(f"massdns exited with code {return_code}")
+                if on_execution is not None:
+                    await on_execution(execution)
+                else:
+                    executions.append(execution)
 
     metrics = MassDnsBatchMetrics(
         stdout_lines=stdout_lines,
-        parsed_results=len(matched),
+        parsed_results=yielded_count,
         unmatched_results=unmatched,
         stderr_lines=stderr_lines,
         exit_code=return_code,
