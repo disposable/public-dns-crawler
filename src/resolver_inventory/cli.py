@@ -199,6 +199,21 @@ def _candidate_sort_key(candidate) -> tuple[str, str, str, int, str]:
     )
 
 
+def _validation_candidate_sort_key(candidate, settings: Settings) -> tuple[int, str, str, int, str]:
+    if (
+        settings.validation.dns_backend.kind == "massdns"
+        and candidate.transport == "dns-udp"
+        and candidate.port == 53
+    ):
+        priority = 0
+    elif candidate.transport in {"dns-udp", "dns-tcp"}:
+        priority = 1
+    else:
+        priority = 2
+    transport, endpoint_url, host, port, path = _candidate_sort_key(candidate)
+    return (priority, transport, endpoint_url, host, port, path)
+
+
 # ---------------------------------------------------------------------------
 # Sub-command handlers
 # ---------------------------------------------------------------------------
@@ -253,13 +268,14 @@ def cmd_validate(args: argparse.Namespace) -> int:
     _github_group("Discovery")
     if args.input:
         candidates = [candidate_from_dict(record) for record in load_json_list(args.input)]
+        candidates.sort(key=lambda candidate: _validation_candidate_sort_key(candidate, settings))
         logger.info("Loaded %d candidates from %s", len(candidates), args.input)
     else:
         raw_candidates = discover_candidates(settings)
         candidates = normalize_dns_candidates(raw_candidates) + normalize_doh_candidates(
             raw_candidates
         )
-        candidates.sort(key=_candidate_sort_key)
+        candidates.sort(key=lambda candidate: _validation_candidate_sort_key(candidate, settings))
         logger.info("Discovered %d normalized candidates", len(candidates))
     _github_endgroup()
 

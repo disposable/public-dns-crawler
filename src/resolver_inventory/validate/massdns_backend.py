@@ -73,6 +73,7 @@ def build_massdns_command(
     rdtype: str,
     resolver_file: Path,
 ) -> list[str]:
+    interval_ms = max(1, config.interval_ms)
     cmd = [
         config.massdns_bin,
         "--extended-input",
@@ -87,7 +88,7 @@ def build_massdns_command(
         "--socket-count",
         str(config.socket_count),
         "--interval",
-        str(config.interval_ms),
+        str(interval_ms),
         "-r",
         str(resolver_file),
     ]
@@ -100,7 +101,7 @@ def build_massdns_command(
 
 def build_manifest_line(spec: PlainDnsProbeSpec) -> str:
     resolver = f"{spec.host}:{spec.port}"
-    return f"{spec.qname} {spec.rdtype} {resolver}\n"
+    return f"{spec.qname} {resolver}\n"
 
 
 async def stream_manifest_to_massdns(

@@ -64,7 +64,7 @@ def test_group_probe_specs_for_massdns_by_rdtype_and_size() -> None:
 
 def test_build_manifest_line() -> None:
     line = build_manifest_line(_spec(probe_id="1", rdtype="A"))
-    assert line == "a.ok.test.local. A 127.0.0.1:53\n"
+    assert line == "a.ok.test.local. 127.0.0.1:53\n"
 
 
 def test_build_massdns_command() -> None:
@@ -74,6 +74,7 @@ def test_build_massdns_command() -> None:
     assert "--extended-input" in cmd
     assert "-o" in cmd and "Je" in cmd
     assert "-t" in cmd and "A" in cmd
+    assert "--interval" in cmd and "1" in cmd
 
 
 def test_parse_massdns_ndjson_success_line() -> None:

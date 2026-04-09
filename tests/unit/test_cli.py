@@ -13,13 +13,17 @@ from resolver_inventory.cli import (
     _apply_probe_corpus_override,
     _build_parser,
     _ValidateProgressReporter,
+    _validation_candidate_sort_key,
     cmd_generate_probe_corpus,
     cmd_materialize_results,
     cmd_split_candidates,
     main,
 )
 from resolver_inventory.models import Candidate, ValidationResult
-from resolver_inventory.probe_corpus.models import GeneratedProbeCorpusResult, ProbeGenerationReport
+from resolver_inventory.probe_corpus.models import (
+    GeneratedProbeCorpusResult,
+    ProbeGenerationReport,
+)
 from resolver_inventory.probe_corpus.schema import ProbeCorpus, ProbeDefinition
 from resolver_inventory.validate import ValidationProgress
 
@@ -207,6 +211,46 @@ class TestCliProbeCorpusOverride:
         assert settings.validation.dns_backend.kind == "massdns"
         assert settings.validation.dns_backend.massdns_bin == "/tmp/massdns"
         assert settings.validation.dns_backend.hashmap_size == 8192
+
+
+class TestValidationCandidateSorting:
+    def test_massdns_backend_prioritizes_udp_53_candidates(self) -> None:
+        from resolver_inventory.settings import Settings
+
+        settings = Settings()
+        settings.validation.dns_backend.kind = "massdns"
+        dns_tcp = Candidate(
+            provider=None,
+            source="test",
+            transport="dns-tcp",
+            endpoint_url=None,
+            host="192.0.2.2",
+            port=53,
+            path=None,
+        )
+        dns_udp = Candidate(
+            provider=None,
+            source="test",
+            transport="dns-udp",
+            endpoint_url=None,
+            host="192.0.2.1",
+            port=53,
+            path=None,
+        )
+        doh = Candidate(
+            provider=None,
+            source="test",
+            transport="doh",
+            endpoint_url="https://dns.example/dns-query",
+            host="dns.example",
+            port=443,
+            path="/dns-query",
+        )
+
+        candidates = [dns_tcp, doh, dns_udp]
+        candidates.sort(key=lambda candidate: _validation_candidate_sort_key(candidate, settings))
+
+        assert [candidate.transport for candidate in candidates] == ["dns-udp", "dns-tcp", "doh"]
 
 
 class TestValidateProgressReporter:
