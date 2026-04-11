@@ -46,7 +46,7 @@ network = []
 [dependency-groups]
 dev = [
   "bandit>=1.8",
-  "coverage[toml]>=7.8",
+  "coverage[toml]>=7.13.5",
   "pyright>=1.1.408",
   "pytest>=8.3",
   "pytest-asyncio>=0.26",
