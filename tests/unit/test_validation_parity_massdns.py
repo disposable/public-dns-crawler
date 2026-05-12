@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import sys
 from pathlib import Path
 
 import dns.message
@@ -109,6 +110,7 @@ def _fake_dns_response(msg: dns.message.Message) -> dns.message.Message:
     return response
 
 
+@pytest.mark.skipif(sys.platform == "win32", reason="massdns not available on Windows")
 def test_massdns_backend_decision_parity(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
