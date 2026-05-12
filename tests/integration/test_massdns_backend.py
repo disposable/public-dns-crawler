@@ -134,14 +134,17 @@ async def test_massdns_malformed_ndjson_line(
     fake = _make_fake_massdns(tmp_path)
     monkeypatch.setenv("FAKE_MASSDNS_MODE", "malformed")
     cfg = DnsBackendConfig(kind="massdns", massdns_bin=str(fake))
-    with pytest.raises(ValueError):
-        await run_massdns_batch(
-            [_spec("p1")],
-            config=cfg,
-            timeout_s=1.0,
-            baseline_resolvers=["127.0.0.1:53"],
-            baseline_cache={},
-        )
+    results, metrics = await run_massdns_batch(
+        [_spec("p1")],
+        config=cfg,
+        timeout_s=1.0,
+        baseline_resolvers=["127.0.0.1:53"],
+        baseline_cache={},
+    )
+    # Malformed lines are skipped; the probe ends up unresolved and marked as failed.
+    assert len(results) == 1
+    assert not results[0].result.ok
+    assert metrics.unmatched_results >= 1
 
 
 @pytest.mark.asyncio
@@ -173,11 +176,15 @@ async def test_massdns_stalled_stdout_times_out(
     fake = _make_fake_massdns(tmp_path)
     monkeypatch.setenv("FAKE_MASSDNS_MODE", "stall")
     cfg = DnsBackendConfig(kind="massdns", massdns_bin=str(fake))
-    with pytest.raises(TimeoutError, match="batch timed out"):
-        await run_massdns_batch(
-            [_spec("p1")],
-            config=cfg,
-            timeout_s=0.05,
-            baseline_resolvers=["127.0.0.1:53"],
-            baseline_cache={},
-        )
+    # TimeoutError from _run_massdns_attempt is caught by run_massdns_rdtype_session;
+    # the probe is returned as a failure rather than crashing the caller.
+    results, _metrics = await run_massdns_batch(
+        [_spec("p1")],
+        config=cfg,
+        timeout_s=0.05,
+        baseline_resolvers=["127.0.0.1:53"],
+        baseline_cache={},
+    )
+    assert len(results) == 1
+    assert not results[0].result.ok
+    assert results[0].result.error is not None and "massdns_unmatched" in results[0].result.error

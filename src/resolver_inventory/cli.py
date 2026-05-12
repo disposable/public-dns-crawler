@@ -207,7 +207,9 @@ def _candidate_sort_key(candidate) -> tuple[str, str, str, int, str]:
     )
 
 
-def _validation_candidate_sort_key(candidate, settings: Settings) -> tuple[int, str, str, int, str]:
+def _validation_candidate_sort_key(
+    candidate, settings: Settings
+) -> tuple[int, str, str, str, int, str]:
     if (
         settings.validation.dns_backend.kind == "massdns"
         and candidate.transport == "dns-udp"

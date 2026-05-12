@@ -382,6 +382,7 @@ async def _run_massdns_attempt(
     proc = worker.proc
     assert proc.stdin is not None
     assert proc.stdout is not None
+    stdout = proc.stdout
 
     pending_by_key: dict[tuple[str, str, str], deque[PlainDnsProbeSpec]] = defaultdict(deque)
     pending_by_name_type: dict[tuple[str, str], deque[PlainDnsProbeSpec]] = defaultdict(deque)
@@ -420,32 +421,50 @@ async def _run_massdns_attempt(
 
     async def _parse_stdout() -> None:
         nonlocal stdout_lines, unmatched
-        while True:
-            raw = await proc.stdout.readline()
-            if not raw:
-                break
-            stdout_lines += 1
-            line = raw.decode("utf-8", errors="replace").strip()
-            if not line:
-                continue
-            parsed = parse_massdns_ndjson_line(line, default_rdtype=rdtype)
-            if parsed.resolver:
-                key = _result_identity_key(parsed.resolver, parsed.qname, parsed.rdtype)
-                queue = pending_by_key.get(key)
-            else:
-                key = _name_type_identity_key(parsed.qname, parsed.rdtype)
-                queue = pending_by_name_type.get(key)
-            if not queue:
-                unmatched += 1
-                logger.debug("ignoring unmatched massdns line: %s", line[:200])
-                continue
-            while queue:
-                spec = queue.popleft()
-                if spec.probe_id not in matched_probe_ids:
-                    await _record_match(spec, parsed)
+        try:
+            while True:
+                raw = await stdout.readline()
+                if not raw:
                     break
-            else:
-                unmatched += 1
+                stdout_lines += 1
+                line = raw.decode("utf-8", errors="replace").strip()
+                if not line:
+                    continue
+                try:
+                    parsed = parse_massdns_ndjson_line(line, default_rdtype=rdtype)
+                except (ValueError, KeyError):
+                    logger.warning("massdns: skipping unparseable output line: %s", line[:200])
+                    unmatched += 1
+                    continue
+                if parsed.resolver:
+                    key = _result_identity_key(parsed.resolver, parsed.qname, parsed.rdtype)
+                    queue = pending_by_key.get(key)
+                else:
+                    key = _name_type_identity_key(parsed.qname, parsed.rdtype)
+                    queue = pending_by_name_type.get(key)
+                if not queue:
+                    unmatched += 1
+                    logger.debug("ignoring unmatched massdns line: %s", line[:200])
+                    continue
+                while queue:
+                    spec = queue.popleft()
+                    if spec.probe_id not in matched_probe_ids:
+                        await _record_match(spec, parsed)
+                        break
+                else:
+                    unmatched += 1
+        finally:
+            # Always wake the stdin writer so it can detect task completion and stop blocking.
+            async with pending_cond:
+                pending_cond.notify_all()
+
+    # Compute a single deadline that covers the entire attempt — both the stdin
+    # writer loop (which blocks on pending_cond when in_flight_limit is reached)
+    # and the final stdout-drain phase.  Using remaining_count here ensures the
+    # estimate is available before we start sending probes.
+    loop = asyncio.get_event_loop()
+    global_timeout = _estimate_session_timeout(timeout_s, remaining_count)
+    deadline = loop.time() + global_timeout
 
     parser_task = asyncio.create_task(_parse_stdout())
     try:
@@ -453,9 +472,23 @@ async def _run_massdns_attempt(
         for spec in source():
             if spec.probe_id in already_resolved:
                 continue
-            async with pending_cond:
-                while current_pending >= in_flight_limit:
-                    await pending_cond.wait()
+            # Apply the global deadline to the in-flight-limit wait so a slow
+            # massdns (e.g. --predictable mode with many AAAA queries) cannot
+            # hold the stdin loop open past the overall session timeout.
+            try:
+                async with asyncio.timeout_at(deadline):
+                    async with pending_cond:
+                        while current_pending >= in_flight_limit:
+                            await pending_cond.wait()
+            except TimeoutError:
+                logger.warning(
+                    "massdns session deadline reached during stdin write; stopping input"
+                )
+                break
+            if parser_task.done():
+                # Parser exited early (massdns closed stdout or an unrecoverable error);
+                # stop feeding stdin — unresolved specs are handled by the retry/fallback logic.
+                break
             pending_by_key[_spec_identity_key(spec)].append(spec)
             pending_by_name_type[_name_type_identity_key(spec.qname, spec.rdtype)].append(spec)
             current_pending += 1
@@ -471,8 +504,8 @@ async def _run_massdns_attempt(
         proc.stdin.close()
         await proc.stdin.wait_closed()
 
-        timeout_window = _estimate_session_timeout(timeout_s, max(probes_sent, remaining_count))
-        async with asyncio.timeout(timeout_window):
+        remaining_time = max(1.0, deadline - loop.time())
+        async with asyncio.timeout(remaining_time):
             await parser_task
             return_code = await proc.wait()
         stderr_lines = await close_massdns_worker(worker)
@@ -544,16 +577,24 @@ async def run_massdns_rdtype_session(
         return sum(1 for spec in source() if spec.probe_id not in resolved_probe_ids)
 
     while _count_remaining() > 0:
-        metrics, matched_ids, executions, remaining_before = await _run_massdns_attempt(
-            source=source,
-            rdtype=rdtype,
-            config=config,
-            timeout_s=timeout_s,
-            baseline_resolvers=baseline_resolvers,
-            baseline_cache=baseline_cache,
-            already_resolved=resolved_probe_ids,
-            on_execution=on_execution,
-        )
+        try:
+            metrics, matched_ids, executions, remaining_before = await _run_massdns_attempt(
+                source=source,
+                rdtype=rdtype,
+                config=config,
+                timeout_s=timeout_s,
+                baseline_resolvers=baseline_resolvers,
+                baseline_cache=baseline_cache,
+                already_resolved=resolved_probe_ids,
+                on_execution=on_execution,
+            )
+        except TimeoutError:
+            logger.warning(
+                "massdns session rdtype=%s timed out; treating %d unresolved probes as failures",
+                rdtype,
+                _count_remaining(),
+            )
+            break
         resolved_probe_ids.update(matched_ids)
         if on_execution is None:
             all_executions.extend(executions)

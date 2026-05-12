@@ -6,6 +6,7 @@ import json
 import sqlite3
 import tempfile
 from pathlib import Path
+from typing import Any
 
 from resolver_inventory.models import ProbeResult
 
@@ -20,7 +21,7 @@ def probe_result_to_dict(probe: ProbeResult) -> dict[str, object]:
     }
 
 
-def probe_result_from_dict(data: dict[str, object]) -> ProbeResult:
+def probe_result_from_dict(data: dict[str, Any]) -> ProbeResult:
     return ProbeResult(
         ok=bool(data["ok"]),
         probe=str(data["probe"]),
