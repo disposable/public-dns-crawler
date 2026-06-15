@@ -180,14 +180,40 @@ class TestPublicDnsInfoSource:
             ("192.0.2.11", "dns-tcp"),
         ]
 
-    def test_fetch_failure_is_fatal(self, monkeypatch) -> None:
+    def test_fetch_failure_returns_empty(self, monkeypatch) -> None:
+        calls: list[str] = []
+
         def fake_urlopen(url: str, timeout: int = 30) -> _FakeResponse:
+            calls.append(url)
             raise OSError("Network is unreachable")
 
         monkeypatch.setattr(urllib.request, "urlopen", fake_urlopen)
 
         source = PublicDnsInfoSource(SourceEntry(type="publicdns_info"))
-        import pytest
+        candidates = source.candidates()
 
-        with pytest.raises(RuntimeError, match="publicdns_info fetch failed"):
-            source.candidates()
+        assert candidates == []
+        assert len(calls) == 4  # 1 initial + 3 retries
+
+    def test_fetch_retries_then_succeeds(self, monkeypatch) -> None:
+        body = """ip_address,reliability,as_org,country_id
+192.0.2.5,0.99,Works After Retry,US
+"""
+        call_count = 0
+
+        def fake_urlopen(url: str, timeout: int = 30) -> _FakeResponse:
+            nonlocal call_count
+            call_count += 1
+            if call_count < 3:
+                raise OSError("Network is unreachable")
+            return _FakeResponse(body)
+
+        monkeypatch.setattr(urllib.request, "urlopen", fake_urlopen)
+
+        candidates = PublicDnsInfoSource(SourceEntry(type="publicdns_info")).candidates()
+
+        assert call_count == 3
+        assert [(candidate.host, candidate.transport) for candidate in candidates] == [
+            ("192.0.2.5", "dns-udp"),
+            ("192.0.2.5", "dns-tcp"),
+        ]

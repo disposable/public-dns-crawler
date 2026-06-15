@@ -4,11 +4,11 @@ from __future__ import annotations
 
 import csv
 import io
-import urllib.request
 
 from resolver_inventory.models import Candidate, FilteredCandidate
 from resolver_inventory.sources.base import BaseSource
 from resolver_inventory.util.logging import get_logger
+from resolver_inventory.util.retry import fetch_url
 
 logger = get_logger(__name__)
 
@@ -30,12 +30,11 @@ class PublicDnsInfoSource(BaseSource):
         url = self.entry.url or self.entry.extra.get("url") or DEFAULT_URL
         min_reliability = self._min_reliability()
         try:
-            with urllib.request.urlopen(url, timeout=30) as resp:
-                content = resp.read().decode("utf-8", errors="replace")
+            content = fetch_url(url, timeout=30).decode("utf-8", errors="replace")
         except Exception as exc:
             msg = f"publicdns_info fetch failed: {exc}"
             logger.error(msg)
-            raise RuntimeError(msg) from exc
+            return []
 
         results: list[Candidate] = []
         reader = csv.DictReader(io.StringIO(content))

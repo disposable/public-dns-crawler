@@ -3,11 +3,11 @@
 from __future__ import annotations
 
 import re
-import urllib.request
 
 from resolver_inventory.models import Candidate
 from resolver_inventory.sources.base import BaseSource
 from resolver_inventory.util.logging import get_logger
+from resolver_inventory.util.retry import fetch_url
 
 logger = get_logger(__name__)
 
@@ -29,8 +29,7 @@ class AdGuardSource(BaseSource):
     def candidates(self) -> list[Candidate]:
         url = self.entry.url or self.entry.extra.get("url") or PROVIDERS_URL
         try:
-            with urllib.request.urlopen(url, timeout=30) as resp:
-                data = resp.read().decode("utf-8", errors="replace")
+            data = fetch_url(url, timeout=30).decode("utf-8", errors="replace")
         except Exception as exc:
             logger.warning("adguard fetch failed: %s", exc)
             return []
