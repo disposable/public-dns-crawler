@@ -92,6 +92,8 @@ class _ValidationAccumulator:
         settings: Settings,
         emit_result: ValidationResultCallback,
         progress_callback: ProgressCallback | None,
+        history_connection: Any = None,
+        run_date: Any = None,
     ) -> None:
         self.candidates = candidates
         self.expected_counts = expected_counts
@@ -99,6 +101,8 @@ class _ValidationAccumulator:
         self.settings = settings
         self.emit_result = emit_result
         self.progress_callback = progress_callback
+        self.history_connection = history_connection
+        self.run_date = run_date
         self.completed_counts = {idx: 0 for idx in expected_counts}
         self.store = ValidationStateStore()
         self.ready_results: dict[int, ValidationResult] = {}
@@ -113,7 +117,13 @@ class _ValidationAccumulator:
         if self.completed_counts[candidate_idx] == self.expected_counts[candidate_idx]:
             probes = self.store.load_probe_results(candidate_idx)
             self.store.delete_candidate(candidate_idx)
-            validation = score(self.candidates[candidate_idx], probes, self.settings)
+            validation = score(
+                self.candidates[candidate_idx],
+                probes,
+                self.settings,
+                history_connection=self.history_connection,
+                run_date=self.run_date,
+            )
             self.ready_results[candidate_idx] = validation
             self._emit_ready()
 
@@ -145,6 +155,8 @@ class _ValidationAccumulator:
                 self.candidates[candidate_idx],
                 probes,
                 self.settings,
+                history_connection=self.history_connection,
+                run_date=self.run_date,
             )
         self._emit_ready()
 
@@ -539,6 +551,8 @@ async def _validate_candidates_async(
     *,
     emit_result: ValidationResultCallback,
     progress_callback: ProgressCallback | None,
+    history_connection: Any = None,
+    run_date: Any = None,
 ) -> None:
     if not candidates:
         return
@@ -551,6 +565,8 @@ async def _validate_candidates_async(
         settings,
         emit_result,
         progress_callback,
+        history_connection=history_connection,
+        run_date=run_date,
     )
     timeout_s = settings.validation.timeout_ms / 1000.0
     baseline_resolvers = settings.validation.baseline_resolvers
@@ -674,6 +690,8 @@ def validate_candidates_stream(
     emit_result: ValidationResultCallback,
     settings: Settings | None = None,
     progress_callback: ProgressCallback | None = None,
+    history_connection: Any = None,
+    run_date: Any = None,
 ) -> None:
     if settings is None:
         from resolver_inventory.settings import Settings as S
@@ -703,6 +721,8 @@ def validate_candidates_stream(
             baseline_cache,
             emit_result=emit_result,
             progress_callback=progress_callback,
+            history_connection=history_connection,
+            run_date=run_date,
         )
 
     asyncio.run(_run())
@@ -712,6 +732,8 @@ def validate_candidates_iter(
     candidates: list[Candidate],
     settings: Settings | None = None,
     progress_callback: ProgressCallback | None = None,
+    history_connection: Any = None,
+    run_date: Any = None,
 ) -> Iterator[ValidationResult]:
     results: list[ValidationResult] = []
     validate_candidates_stream(
@@ -719,6 +741,8 @@ def validate_candidates_iter(
         lambda result: results.append(result),
         settings=settings,
         progress_callback=progress_callback,
+        history_connection=history_connection,
+        run_date=run_date,
     )
     yield from results
 
@@ -727,5 +751,15 @@ def validate_candidates(
     candidates: list[Candidate],
     settings: Settings | None = None,
     progress_callback: ProgressCallback | None = None,
+    history_connection: Any = None,
+    run_date: Any = None,
 ) -> list[ValidationResult]:
-    return list(validate_candidates_iter(candidates, settings, progress_callback))
+    return list(
+        validate_candidates_iter(
+            candidates,
+            settings,
+            progress_callback,
+            history_connection,
+            run_date,
+        )
+    )

@@ -66,7 +66,7 @@ resolver-inventory export unbound  [--input FILE] [--output FILE]
 
 Global flags: `--config FILE`, `--log-level {DEBUG,INFO,WARNING,ERROR}`.
 
-Validation commands also support `--probe-corpus FILE`, `--validation-parallelism N`, `--dns-backend {python,massdns}`, `--massdns-bin PATH`, and `--massdns-hashmap-size N`. When `--probe-corpus` is provided, the CLI sets `validation.corpus.mode = "external"` and loads probes from that local JSON file.
+Validation commands also support `--probe-corpus FILE`, `--validation-parallelism N`, `--dns-backend {python,massdns}`, `--massdns-bin PATH`, `--massdns-hashmap-size N`, `--history-db FILE`, and `--run-date YYYY-MM-DD`. When `--probe-corpus` is provided, the CLI sets `validation.corpus.mode = "external"` and loads probes from that local JSON file. `--history-db` opens the history database read-only so shard jobs can score against shared history without locking it.
 JSON exports are written in compact form and sorted deterministically by endpoint identity to keep diffs stable.
 Use `--split-json-max-bytes N` on `refresh`, `materialize-results`, or `export json` to split large JSON outputs into `.part-XXXX` files.
 
@@ -133,6 +133,10 @@ path = "configs/manual-doh.toml"
 rounds = 3
 timeout_ms = 2000
 parallelism = 50
+require_tcp_for_dns = false            # when true, accepted dns-udp results require
+                                       # an accepted dns-tcp result on the same host:port
+require_tls_valid_for_doh = true       # when false, DoH TLS failures are penalties
+                                       # only instead of hard failures
 
 [validation.dns_backend]
 kind = "python"                       # default backend; "massdns" is optional
@@ -544,8 +548,9 @@ This allows:
 
 ### History Availability
 
-Scoring distinguishes between:
-- **No history rows for a resolver**: history analysis is skipped (no history score/caps/reasons).
+Validation consults history when `--history-db` is provided (read-only). Scoring distinguishes between:
+- **No history database**: history analysis is skipped entirely (no history score/caps/reasons).
+- **No history rows for a resolver**: the resolver counts as zero observed runs and the `<3 runs` cap applies.
 - **Sparse existing history**: history-based caps and stability logic can still apply.
 - **Meaningful history**: full history scoring behavior applies.
 

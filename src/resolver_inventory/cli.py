@@ -10,6 +10,7 @@ import shlex
 import sys
 import threading
 import time
+from datetime import UTC, date, datetime
 from pathlib import Path
 from typing import TYPE_CHECKING
 
@@ -258,6 +259,59 @@ def cmd_discover(args: argparse.Namespace) -> int:
     return 0
 
 
+def _resolve_history_context(args: argparse.Namespace):
+    """Open the history database read-only when --history-db is provided."""
+    from resolver_inventory.history import connect_history_db_readonly
+
+    history_path = getattr(args, "history_db", None)
+    if not history_path:
+        return None, None
+    connection = connect_history_db_readonly(history_path)
+    if connection is None:
+        logger.warning(
+            "History database %s unavailable; scoring without history",
+            history_path,
+        )
+    run_date_arg = getattr(args, "run_date", None)
+    run_date = date.fromisoformat(run_date_arg) if run_date_arg else datetime.now(UTC).date()
+    return connection, run_date
+
+
+def _enforce_tcp_requirement(results: list[ValidationResult], settings: Settings) -> int:
+    """Demote accepted dns-udp results whose host:port has no accepted dns-tcp.
+
+    Enforces validation.require_tcp_for_dns at result-aggregation time since
+    it is a cross-candidate rule. Returns the number of demoted results.
+    """
+    if not settings.validation.require_tcp_for_dns:
+        return 0
+    tcp_accepted = {
+        (r.candidate.host, r.candidate.port)
+        for r in results
+        if r.candidate.transport == "dns-tcp" and r.status == "accepted"
+    }
+    demoted = 0
+    for result in results:
+        candidate = result.candidate
+        if (
+            candidate.transport == "dns-udp"
+            and result.status == "accepted"
+            and (candidate.host, candidate.port) not in tcp_accepted
+        ):
+            result.status = "rejected"
+            result.accepted = False
+            if "tcp_required" not in result.reasons:
+                result.reasons.append("tcp_required")
+            demoted += 1
+    if demoted:
+        logger.info(
+            "require_tcp_for_dns: demoted %d dns-udp result(s) without an "
+            "accepted dns-tcp counterpart",
+            demoted,
+        )
+    return demoted
+
+
 def cmd_validate(args: argparse.Namespace) -> int:
     from resolver_inventory.export.json import (
         StreamingJsonArrayWriter,
@@ -274,6 +328,7 @@ def cmd_validate(args: argparse.Namespace) -> int:
     _apply_probe_corpus_override(args, settings)
     _apply_validation_parallelism_override(args, settings)
     _apply_dns_backend_overrides(args, settings)
+    history_connection, history_run_date = _resolve_history_context(args)
 
     _github_group("Discovery")
     if args.input:
@@ -329,9 +384,13 @@ def cmd_validate(args: argparse.Namespace) -> int:
             _handle_result,
             settings,
             progress_callback=progress.callback,
+            history_connection=history_connection,
+            run_date=history_run_date,
         )
     finally:
         writer.close()
+        if history_connection is not None:
+            history_connection.close()
     progress.emit_done()
     logger.info(
         "Results: %d accepted, %d candidate, %d rejected",
@@ -432,6 +491,8 @@ def cmd_materialize_results(args: argparse.Namespace) -> int:
     results = []
     for shard_path in shard_paths:
         results.extend(validation_result_from_dict(record) for record in load_json_list(shard_path))
+
+    _enforce_tcp_requirement(results, settings)
 
     accepted_status = sum(1 for result in results if result.status == "accepted")
     candidate_status = sum(1 for result in results if result.status == "candidate")
@@ -535,11 +596,19 @@ def cmd_refresh(args: argparse.Namespace) -> int:
 
     _github_group("Validation")
     logger.info("Validating %d candidates…", len(candidates))
-    results = validate_candidates(
-        candidates,
-        settings,
-        progress_callback=_make_validation_progress_logger("refresh"),
-    )
+    history_connection, history_run_date = _resolve_history_context(args)
+    try:
+        results = validate_candidates(
+            candidates,
+            settings,
+            progress_callback=_make_validation_progress_logger("refresh"),
+            history_connection=history_connection,
+            run_date=history_run_date,
+        )
+    finally:
+        if history_connection is not None:
+            history_connection.close()
+    _enforce_tcp_requirement(results, settings)
     accepted = [r for r in results if r.accepted]
     accepted_count = len(accepted)
     total_count = len(results)
@@ -803,6 +872,16 @@ def _build_parser() -> argparse.ArgumentParser:
         metavar="INT",
         help="Split large JSON output files into .part-XXXX chunks of at most INT bytes",
     )
+    p_validate.add_argument(
+        "--history-db",
+        metavar="FILE",
+        help="Read resolver history from DuckDB FILE for history-aware scoring",
+    )
+    p_validate.add_argument(
+        "--run-date",
+        metavar="YYYY-MM-DD",
+        help="Override the run date used for history lookups (default: today, UTC)",
+    )
 
     # refresh
     p_refresh = sub.add_parser(
@@ -847,6 +926,16 @@ def _build_parser() -> argparse.ArgumentParser:
         type=int,
         metavar="INT",
         help="Split large JSON output files into .part-XXXX chunks of at most INT bytes",
+    )
+    p_refresh.add_argument(
+        "--history-db",
+        metavar="FILE",
+        help="Read resolver history from DuckDB FILE for history-aware scoring",
+    )
+    p_refresh.add_argument(
+        "--run-date",
+        metavar="YYYY-MM-DD",
+        help="Override the run date used for history lookups (default: today, UTC)",
     )
 
     p_split = sub.add_parser(

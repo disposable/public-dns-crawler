@@ -609,3 +609,93 @@ class TestShardCommands:
         assert (tmp_path / "out" / "resolvers.txt").exists()
         accepted = json.loads((tmp_path / "out" / "accepted.json").read_text(encoding="utf-8"))
         assert [item["candidate"]["host"] for item in accepted] == ["192.0.2.1", "192.0.2.2"]
+
+
+def _dns_result(host: str, transport: str, status: str, port: int = 53) -> ValidationResult:
+    return ValidationResult(
+        candidate=Candidate(
+            provider=None,
+            source="test",
+            transport=transport,  # type: ignore[arg-type]
+            endpoint_url=None,
+            host=host,
+            port=port,
+            path=None,
+        ),
+        accepted=status == "accepted",
+        score=90 if status == "accepted" else 10,
+        status=status,  # type: ignore[arg-type]
+        reasons=[],
+        probes=[],
+    )
+
+
+class TestEnforceTcpRequirement:
+    """require_tcp_for_dns demotes dns-udp results lacking an accepted TCP pair."""
+
+    def _settings(self, required: bool):
+        from resolver_inventory.settings import Settings
+
+        settings = Settings()
+        settings.validation.require_tcp_for_dns = required
+        return settings
+
+    def test_disabled_leaves_results_untouched(self) -> None:
+        from resolver_inventory.cli import _enforce_tcp_requirement
+
+        results = [_dns_result("1.1.1.1", "dns-udp", "accepted")]
+        demoted = _enforce_tcp_requirement(results, self._settings(False))
+        assert demoted == 0
+        assert results[0].status == "accepted"
+
+    def test_udp_without_tcp_is_demoted(self) -> None:
+        from resolver_inventory.cli import _enforce_tcp_requirement
+
+        results = [_dns_result("1.1.1.1", "dns-udp", "accepted")]
+        demoted = _enforce_tcp_requirement(results, self._settings(True))
+        assert demoted == 1
+        assert results[0].status == "rejected"
+        assert results[0].accepted is False
+        assert "tcp_required" in results[0].reasons
+
+    def test_udp_with_accepted_tcp_is_kept(self) -> None:
+        from resolver_inventory.cli import _enforce_tcp_requirement
+
+        results = [
+            _dns_result("1.1.1.1", "dns-udp", "accepted"),
+            _dns_result("1.1.1.1", "dns-tcp", "accepted"),
+        ]
+        demoted = _enforce_tcp_requirement(results, self._settings(True))
+        assert demoted == 0
+        assert results[0].status == "accepted"
+
+    def test_rejected_tcp_does_not_save_udp(self) -> None:
+        from resolver_inventory.cli import _enforce_tcp_requirement
+
+        results = [
+            _dns_result("1.1.1.1", "dns-udp", "accepted"),
+            _dns_result("1.1.1.1", "dns-tcp", "rejected"),
+        ]
+        demoted = _enforce_tcp_requirement(results, self._settings(True))
+        assert demoted == 1
+        assert results[0].status == "rejected"
+        # The TCP result itself is untouched
+        assert results[1].status == "rejected"
+
+    def test_port_must_match(self) -> None:
+        from resolver_inventory.cli import _enforce_tcp_requirement
+
+        results = [
+            _dns_result("1.1.1.1", "dns-udp", "accepted", port=5353),
+            _dns_result("1.1.1.1", "dns-tcp", "accepted", port=53),
+        ]
+        demoted = _enforce_tcp_requirement(results, self._settings(True))
+        assert demoted == 1
+
+    def test_udp_candidate_status_is_not_demoted(self) -> None:
+        from resolver_inventory.cli import _enforce_tcp_requirement
+
+        results = [_dns_result("1.1.1.1", "dns-udp", "candidate")]
+        demoted = _enforce_tcp_requirement(results, self._settings(True))
+        assert demoted == 0
+        assert results[0].status == "candidate"

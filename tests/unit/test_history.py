@@ -8,7 +8,9 @@ from resolver_inventory.history import (
     DNS_QUARANTINE_DAYS,
     HISTORY_SCHEMA_VERSION,
     apply_dns_quarantine,
+    compute_latest_summary,
     connect_history_db,
+    connect_history_db_readonly,
     derive_dns_host_outcomes,
     ensure_history_schema,
     get_resolver_stability_metrics,
@@ -18,7 +20,12 @@ from resolver_inventory.history import (
     prune_history,
     update_history,
 )
-from resolver_inventory.models import Candidate, ProbeResult, ValidationResult
+from resolver_inventory.models import (
+    Candidate,
+    FilteredCandidate,
+    ProbeResult,
+    ValidationResult,
+)
 from resolver_inventory.readme_report import (
     GENERATED_STATS_END,
     GENERATED_STATS_START,
@@ -794,3 +801,181 @@ class TestSchemaManagement:
             assert connection.execute("SELECT COUNT(*) FROM runs").fetchone()[0] == 0
             assert connection.execute("SELECT COUNT(*) FROM resolver_run_status").fetchone()[0] == 0
             assert connection.execute("SELECT COUNT(*) FROM resolver_daily").fetchone()[0] == 0
+
+
+def _filtered(host: str = "198.51.100.1") -> FilteredCandidate:
+    return FilteredCandidate(
+        candidate=Candidate(
+            provider=None,
+            source="test",
+            transport="dns-udp",
+            endpoint_url=None,
+            host=host,
+            port=53,
+            path=None,
+        ),
+        reason="invalid_dns_host",
+        detail="test filtered candidate",
+        stage="source",
+    )
+
+
+class TestSummaryCountsAndDeltas:
+    """compute_latest_summary reports filtered counts and per-run deltas."""
+
+    def test_first_run_records_filtered_and_deltas(self, tmp_path) -> None:
+        db_path = tmp_path / "history.duckdb"
+        with connect_history_db(db_path) as connection:
+            update_history(
+                connection,
+                _metadata(date(2026, 1, 1)),
+                [
+                    _dns_result("1.1.1.1", "dns-udp", "accepted"),
+                    _dns_result("2.2.2.2", "dns-udp", "rejected"),
+                ],
+                [_filtered(), _filtered("198.51.100.2")],
+            )
+            summary = compute_latest_summary(connection)
+        assert summary["accepted_count"] == 1
+        assert summary["rejected_count"] == 1
+        assert summary["filtered_count"] == 2
+        # With no previous run, deltas are relative to zero
+        assert summary["accepted_delta"] == 1
+        assert summary["rejected_delta"] == 1
+
+    def test_deltas_compare_to_previous_run(self, tmp_path) -> None:
+        db_path = tmp_path / "history.duckdb"
+        with connect_history_db(db_path) as connection:
+            update_history(
+                connection,
+                _metadata(date(2026, 1, 1)),
+                [
+                    _dns_result("1.1.1.1", "dns-udp", "accepted"),
+                    _dns_result("2.2.2.2", "dns-udp", "rejected"),
+                ],
+                [_filtered(), _filtered("198.51.100.2")],
+            )
+            update_history(
+                connection,
+                _metadata(date(2026, 1, 2)),
+                [
+                    _dns_result("1.1.1.1", "dns-udp", "accepted"),
+                    _dns_result("3.3.3.3", "dns-udp", "accepted"),
+                ],
+                [_filtered()],
+            )
+            summary = compute_latest_summary(connection)
+        assert summary["accepted_count"] == 2
+        assert summary["rejected_count"] == 0
+        assert summary["filtered_count"] == 1
+        assert summary["accepted_delta"] == 1
+        assert summary["rejected_delta"] == -1
+
+
+class TestSchemaMigration:
+    """Older schema versions migrate in place instead of rebuilding."""
+
+    def test_v3_schema_migrates_preserving_data(self, tmp_path) -> None:
+        db_path = tmp_path / "history.duckdb"
+        with connect_history_db(db_path) as connection:
+            update_history(
+                connection,
+                _metadata(date(2026, 1, 1)),
+                [_dns_result("1.1.1.1", "dns-udp", "accepted")],
+                [_filtered()],
+            )
+            # Simulate a v3 database: drop the v4 column and mark version 3
+            connection.execute("ALTER TABLE runs DROP COLUMN filtered_count")
+            connection.execute(
+                "UPDATE schema_metadata SET value = '3' WHERE key = 'schema_version'"
+            )
+
+        # Reopening must migrate v3 -> v4 in place, keeping existing rows
+        with connect_history_db(db_path) as connection:
+            columns = {row[1] for row in connection.execute("PRAGMA table_info(runs)").fetchall()}
+            assert "filtered_count" in columns
+            assert connection.execute("SELECT COUNT(*) FROM runs").fetchone()[0] == 1
+            version = connection.execute(
+                "SELECT value FROM schema_metadata WHERE key = 'schema_version'"
+            ).fetchone()[0]
+            assert int(version) == HISTORY_SCHEMA_VERSION
+            # Old v3 row predates filtered tracking: count defaults to zero
+            filtered_count = connection.execute("SELECT filtered_count FROM runs").fetchone()[0]
+            assert filtered_count == 0
+
+    def test_unknown_schema_version_rebuilds(self, tmp_path) -> None:
+        db_path = tmp_path / "history.duckdb"
+        with connect_history_db(db_path) as connection:
+            update_history(
+                connection,
+                _metadata(date(2026, 1, 1)),
+                [_dns_result("1.1.1.1", "dns-udp", "accepted")],
+                [],
+            )
+            connection.execute(
+                "UPDATE schema_metadata SET value = '99' WHERE key = 'schema_version'"
+            )
+
+        with connect_history_db(db_path) as connection:
+            assert connection.execute("SELECT COUNT(*) FROM runs").fetchone()[0] == 0
+
+
+class TestReadonlyHistoryConnection:
+    """Validation opens history read-only and degrades gracefully."""
+
+    def test_missing_database_returns_none(self, tmp_path) -> None:
+        assert connect_history_db_readonly(tmp_path / "nope.duckdb") is None
+
+    def test_empty_database_returns_none(self, tmp_path) -> None:
+        db_path = tmp_path / "history.duckdb"
+        db_path.touch()
+        assert connect_history_db_readonly(db_path) is None
+
+    def test_opens_existing_database(self, tmp_path) -> None:
+        db_path = tmp_path / "history.duckdb"
+        with connect_history_db(db_path) as connection:
+            update_history(
+                connection,
+                _metadata(date(2026, 1, 1)),
+                [_dns_result("1.1.1.1", "dns-udp", "accepted")],
+                [],
+            )
+        connection = connect_history_db_readonly(db_path)
+        try:
+            assert connection is not None
+            metrics = get_resolver_stability_metrics(
+                connection,
+                "dns-udp|1.1.1.1|53",
+                date(2026, 1, 2),
+            )
+            assert metrics is not None
+            assert metrics.runs_seen_30d == 1
+        finally:
+            connection.close()
+
+
+class TestStreakAnchor:
+    """Streaks anchor at the latest observed day, not the requested run_date."""
+
+    def test_streak_anchored_at_latest_observed_day(self, tmp_path) -> None:
+        db_path = tmp_path / "history.duckdb"
+        resolver_key = "dns-udp|1.1.1.1|53"
+        with connect_history_db(db_path) as connection:
+            for offset in range(3):
+                day = date(2026, 1, 1) + timedelta(days=offset)
+                update_history(
+                    connection,
+                    _metadata(day),
+                    [_dns_result("1.1.1.1", "dns-udp", "accepted")],
+                    [],
+                )
+            # Query a date whose rollup has not been written yet (validation
+            # runs before today's update_history call)
+            metrics = get_resolver_stability_metrics(
+                connection,
+                resolver_key,
+                date(2026, 1, 5),
+            )
+            assert metrics is not None
+            assert metrics.consecutive_success_days == 3
+            assert metrics.consecutive_fail_days == 0

@@ -24,7 +24,11 @@ DNS_QUARANTINE_STREAK_DAYS = 14
 DNS_QUARANTINE_DAYS = 90
 
 # Schema version for current history schema.
-HISTORY_SCHEMA_VERSION = 3
+HISTORY_SCHEMA_VERSION = 4
+
+# Schema versions that can be migrated in place to the current version
+# instead of rebuilding the database from scratch.
+_SUPPORTED_SCHEMA_MIGRATIONS = {3}
 
 CURRENT_HISTORY_TABLES = {
     "schema_metadata",
@@ -264,6 +268,25 @@ def connect_history_db(path: str | Path):
     return connection
 
 
+def connect_history_db_readonly(path: str | Path):
+    """Open an existing history database read-only; returns None if unusable.
+
+    Used by validation so concurrent readers (e.g. shard jobs) can consult
+    history without creating or locking the database file.
+    """
+    db_path = Path(path)
+    if not db_path.exists():
+        return None
+    try:
+        connection = duckdb.connect(str(db_path), read_only=True)
+        if "resolver_daily" not in _list_history_tables(connection):
+            connection.close()
+            return None
+        return connection
+    except Exception:
+        return None
+
+
 def ensure_history_schema(connection) -> None:
     """Ensure history schema exists and rebuild cleanly on incompatibility."""
     existing_tables = _list_history_tables(connection)
@@ -272,6 +295,7 @@ def ensure_history_schema(connection) -> None:
         return
 
     _create_current_schema(connection)
+    _migrate_history_schema(connection)
     _write_schema_version(connection)
 
 
@@ -304,7 +328,20 @@ def _schema_needs_rebuild(connection, existing_tables: set[str]) -> bool:
         return True
     if not CURRENT_HISTORY_TABLES.issubset(existing_tables):
         return True
-    return _check_schema_version(connection) != HISTORY_SCHEMA_VERSION
+    version = _check_schema_version(connection)
+    return version != HISTORY_SCHEMA_VERSION and version not in _SUPPORTED_SCHEMA_MIGRATIONS
+
+
+def _migrate_history_schema(connection) -> None:
+    """Apply in-place migrations for supported older schema versions."""
+    version = _check_schema_version(connection)
+    if version == HISTORY_SCHEMA_VERSION:
+        return
+    if version == 3:
+        # v3 -> v4: per-run filtered candidate count
+        connection.execute(
+            "ALTER TABLE runs ADD COLUMN IF NOT EXISTS filtered_count INTEGER DEFAULT 0"
+        )
 
 
 def _recreate_history_schema(connection) -> None:
@@ -347,7 +384,8 @@ def _create_current_schema(connection) -> None:
             github_run_id VARCHAR,
             repo_sha VARCHAR,
             crawler_sha VARCHAR,
-            run_type VARCHAR
+            run_type VARCHAR,
+            filtered_count INTEGER
         )
         """
     )
@@ -414,7 +452,6 @@ def update_history(
     filtered: list[FilteredCandidate],
 ) -> None:
     """Update history with run-level and daily rollup data."""
-    _ = filtered
     # Generate unique run_id for run-level tables
     run_id = f"{metadata.github_run_id}_{metadata.generated_at.isoformat()}"
     run_started_at = metadata.generated_at  # For now, same as generated_at
@@ -423,7 +460,7 @@ def update_history(
     connection.execute(
         """
         INSERT OR REPLACE INTO runs
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
         """,
         [
             run_id,
@@ -434,6 +471,7 @@ def update_history(
             metadata.repo_sha,
             metadata.crawler_sha,
             metadata.run_type,
+            len(filtered),
         ],
     )
 
@@ -862,7 +900,7 @@ def compute_latest_summary(connection) -> dict[str, Any]:
     """Compute summary statistics from the current history schema."""
     latest_run = connection.execute(
         """
-        SELECT run_date, github_run_id
+        SELECT run_date, github_run_id, filtered_count
         FROM runs
         ORDER BY run_date DESC, run_started_at DESC
         LIMIT 1
@@ -886,6 +924,7 @@ def compute_latest_summary(connection) -> dict[str, Any]:
 
     run_date = latest_run[0]
     run_id = latest_run[1]
+    filtered_count = latest_run[2] or 0
 
     # Count runs tracked
     runs_tracked = connection.execute("SELECT COUNT(*) FROM runs").fetchone()[0]
@@ -906,6 +945,22 @@ def compute_latest_summary(connection) -> dict[str, Any]:
     accepted_count = status_counts[0] or 0
     candidate_count = status_counts[1] or 0
     rejected_count = status_counts[2] or 0
+
+    # Get resolver counts for the previous run to compute deltas
+    prev_counts = connection.execute(
+        """
+        SELECT
+            SUM(CASE WHEN status = 'accepted' THEN 1 ELSE 0 END) as accepted,
+            SUM(CASE WHEN status = 'rejected' THEN 1 ELSE 0 END) as rejected
+        FROM resolver_run_status
+        WHERE run_id = (SELECT run_id FROM runs
+                      ORDER BY run_date DESC, run_started_at DESC
+                      LIMIT 1 OFFSET 1)
+        """
+    ).fetchone()
+
+    accepted_delta = accepted_count - ((prev_counts[0] or 0) if prev_counts else 0)
+    rejected_delta = rejected_count - ((prev_counts[1] or 0) if prev_counts else 0)
 
     # Quarantined count
     quarantined_count = connection.execute(
@@ -940,9 +995,9 @@ def compute_latest_summary(connection) -> dict[str, Any]:
         "accepted_count": accepted_count,
         "candidate_count": candidate_count,
         "rejected_count": rejected_count,
-        "filtered_count": 0,  # Not tracked per-run yet
-        "accepted_delta": 0,  # Would need historical comparison
-        "rejected_delta": 0,
+        "filtered_count": filtered_count,
+        "accepted_delta": accepted_delta,
+        "rejected_delta": rejected_delta,
         "quarantined_count": quarantined_count,
         "top_reasons": top_reasons,
         "schema_version": HISTORY_SCHEMA_VERSION,

@@ -2,11 +2,16 @@
 
 from __future__ import annotations
 
-from datetime import date
+from datetime import UTC, date, datetime, timedelta
 from unittest.mock import MagicMock, patch
 
-from resolver_inventory.history import ResolverStabilityMetrics
-from resolver_inventory.models import Candidate, ProbeResult
+from resolver_inventory.history import (
+    ResolverStabilityMetrics,
+    RunMetadata,
+    connect_history_db,
+    update_history,
+)
+from resolver_inventory.models import Candidate, ProbeResult, ValidationResult
 from resolver_inventory.settings import Settings
 from resolver_inventory.validate.scorer import score
 
@@ -483,3 +488,132 @@ class TestOriginalBackwardCompatibility:
         probes = [_fail(error="timeout_or_error:x") for _ in range(8)] + [_ok(), _ok()]
         result = score(_candidate(), probes, Settings())
         assert "timeout_rate_high" in result.reasons
+
+
+def _history_result(host: str, status: str) -> ValidationResult:
+    return ValidationResult(
+        candidate=Candidate(
+            provider=None,
+            source="test",
+            transport="dns-udp",
+            endpoint_url=None,
+            host=host,
+            port=53,
+            path=None,
+        ),
+        accepted=status == "accepted",
+        score=90 if status == "accepted" else 10,
+        status=status,  # type: ignore[arg-type]
+        reasons=[],
+        probes=[_ok()],
+    )
+
+
+def _run_metadata(day: date) -> RunMetadata:
+    return RunMetadata(
+        run_date=day,
+        generated_at=datetime.combine(day, datetime.min.time(), tzinfo=UTC),
+        github_run_id=f"run-{day.isoformat()}",
+        repo_sha="repo-sha",
+        crawler_sha="crawler-sha",
+    )
+
+
+class TestHistoryAwareScoring:
+    """History metrics are consulted when a connection and run_date are given."""
+
+    def test_no_history_connection_means_no_caps(self) -> None:
+        result = score(_candidate(), [_ok() for _ in range(10)], Settings())
+        assert result.score >= 90
+        assert result.score_breakdown["history"] == 0
+        assert not any("insufficient_history" in cap for cap in result.score_caps_applied)
+
+    def test_unseen_resolver_capped_at_90(self, tmp_path) -> None:
+        db_path = tmp_path / "history.duckdb"
+        with connect_history_db(db_path) as connection:
+            result = score(
+                _candidate(),
+                [_ok() for _ in range(10)],
+                Settings(),
+                history_connection=connection,
+                run_date=date(2026, 1, 2),
+            )
+        # History was consulted but no rows exist for this resolver: it
+        # counts as zero observed runs and cannot exceed the <3-run cap
+        assert result.score <= 90
+        assert result.score_breakdown["history"] == 0
+
+    def test_few_history_runs_cap_score(self, tmp_path) -> None:
+        db_path = tmp_path / "history.duckdb"
+        with connect_history_db(db_path) as connection:
+            update_history(
+                connection,
+                _run_metadata(date(2026, 1, 1)),
+                [_history_result("192.0.2.1", "accepted")],
+                [],
+            )
+            result = score(
+                _candidate(),
+                [_ok() for _ in range(10)],
+                Settings(),
+                history_connection=connection,
+                run_date=date(2026, 1, 2),
+            )
+        assert result.score <= 90
+        assert "insufficient_history:1_runs" in result.score_caps_applied
+
+    def test_sufficient_history_removes_caps(self, tmp_path) -> None:
+        db_path = tmp_path / "history.duckdb"
+        with connect_history_db(db_path) as connection:
+            for offset in range(14):
+                day = date(2026, 1, 1) + timedelta(days=offset)
+                update_history(
+                    connection,
+                    _run_metadata(day),
+                    [_history_result("192.0.2.1", "accepted")],
+                    [],
+                )
+            result = score(
+                _candidate(),
+                [_ok() for _ in range(10)],
+                Settings(),
+                history_connection=connection,
+                run_date=date(2026, 1, 15),
+            )
+        assert result.score > 90
+        assert not any("insufficient_history" in cap for cap in result.score_caps_applied)
+
+
+class TestRequireTlsValidForDoh:
+    """require_tls_valid_for_doh controls whether TLS failures are fatal."""
+
+    def _probes_with_tls_failure(self) -> list[ProbeResult]:
+        return [_ok(probe="doh:query:test") for _ in range(9)] + [
+            _fail(probe="doh:tls", error="tls_error:certificate verify failed")
+        ]
+
+    def test_tls_failure_hard_fails_when_required(self) -> None:
+        settings = Settings()
+        settings.validation.require_tls_valid_for_doh = True
+        result = score(_candidate("doh"), self._probes_with_tls_failure(), settings)
+        assert result.status == "rejected"
+        assert "tls_error" in result.reasons
+        assert "hard_fail_cap" in result.score_caps_applied
+
+    def test_tls_failure_is_soft_penalty_when_not_required(self) -> None:
+        settings = Settings()
+        settings.validation.require_tls_valid_for_doh = False
+        result = score(_candidate("doh"), self._probes_with_tls_failure(), settings)
+        # TLS failure still costs correctness points but does not hard-fail
+        assert "tls_error" in result.reasons
+        assert "hard_fail_cap" not in result.score_caps_applied
+        assert result.status != "rejected"
+
+    def test_tls_failure_always_hard_fails_for_dns(self) -> None:
+        # The setting only relaxes DoH candidates
+        settings = Settings()
+        settings.validation.require_tls_valid_for_doh = False
+        probes = [_ok() for _ in range(9)] + [_fail(error="tls_error:certificate verify failed")]
+        result = score(_candidate("dns-udp"), probes, settings)
+        assert result.status == "rejected"
+        assert "hard_fail_cap" in result.score_caps_applied

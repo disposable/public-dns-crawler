@@ -263,6 +263,7 @@ class TestRefreshCommandWithProbeCorpus:
             candidates: list[Candidate],
             settings: Settings,
             progress_callback=None,
+            **kwargs: object,
         ) -> list[object]:
             captured["mode"] = settings.validation.corpus.mode
             captured["path"] = settings.validation.corpus.path or ""
