@@ -32,6 +32,9 @@ from resolver_inventory.readme_report import (
     render_stats_section,
     replace_generated_section,
 )
+from resolver_inventory.settings import Settings
+from resolver_inventory.validate import _compute_rounds_map, _prepare_plain_dns_work
+from resolver_inventory.validate.corpus import Corpus, CorpusEntry
 
 
 def _dns_result(
@@ -979,3 +982,109 @@ class TestStreakAnchor:
             assert metrics is not None
             assert metrics.consecutive_success_days == 3
             assert metrics.consecutive_fail_days == 0
+
+
+def _udp_candidate(host: str) -> Candidate:
+    return Candidate(
+        provider=None,
+        source="test",
+        transport="dns-udp",
+        endpoint_url=None,
+        host=host,
+        port=53,
+        path=None,
+    )
+
+
+class TestRevalidationRounds:
+    """Stable resolvers get reduced probe rounds when history is consulted."""
+
+    def test_disabled_returns_none(self) -> None:
+        settings = Settings()  # revalidation_stable_days defaults to 0
+        assert (
+            _compute_rounds_map([_udp_candidate("1.1.1.1")], settings, object(), date(2026, 1, 1))
+            is None
+        )
+
+    def test_no_history_connection_returns_none(self) -> None:
+        settings = Settings()
+        settings.validation.revalidation_stable_days = 7
+        assert (
+            _compute_rounds_map([_udp_candidate("1.1.1.1")], settings, None, date(2026, 1, 1))
+            is None
+        )
+
+    def test_stable_resolver_gets_reduced_rounds(self, tmp_path) -> None:
+        db_path = tmp_path / "history.duckdb"
+        with connect_history_db(db_path) as connection:
+            for offset in range(8):
+                day = date(2026, 1, 1) + timedelta(days=offset)
+                update_history(
+                    connection,
+                    _metadata(day),
+                    [_dns_result("1.1.1.1", "dns-udp", "accepted")],
+                    [],
+                )
+            settings = Settings()
+            settings.validation.revalidation_stable_days = 7
+            settings.validation.revalidation_stable_rounds = 1
+            rounds_map = _compute_rounds_map(
+                [_udp_candidate("1.1.1.1"), _udp_candidate("9.9.9.9")],
+                settings,
+                connection,
+                date(2026, 1, 9),
+            )
+        assert rounds_map == {0: 1}
+
+    def test_recent_failure_keeps_full_rounds(self, tmp_path) -> None:
+        db_path = tmp_path / "history.duckdb"
+        with connect_history_db(db_path) as connection:
+            for offset in range(8):
+                day = date(2026, 1, 1) + timedelta(days=offset)
+                update_history(
+                    connection,
+                    _metadata(day),
+                    [_dns_result("1.1.1.1", "dns-udp", "accepted")],
+                    [],
+                )
+            update_history(
+                connection,
+                _metadata(date(2026, 1, 9)),
+                [_dns_result("1.1.1.1", "dns-udp", "rejected", ["timeout"])],
+                [],
+            )
+            settings = Settings()
+            settings.validation.revalidation_stable_days = 7
+            settings.validation.revalidation_stable_rounds = 1
+            rounds_map = _compute_rounds_map(
+                [_udp_candidate("1.1.1.1")],
+                settings,
+                connection,
+                date(2026, 1, 10),
+            )
+        assert rounds_map is None
+
+    def test_prepare_uses_per_candidate_rounds(self) -> None:
+        corpus = Corpus(
+            positive=[
+                CorpusEntry(
+                    qname="a.ok.test.",
+                    rdtype="A",
+                    expected_mode="exact_rrset",
+                    expected_answers=["192.0.2.1"],
+                    label="a",
+                )
+            ],
+            nxdomain=[CorpusEntry(qname="nx.test.", rdtype="A", label="nx")],
+        )
+        candidates = [_udp_candidate("1.1.1.1"), _udp_candidate("9.9.9.9")]
+        prepared = _prepare_plain_dns_work(candidates, corpus, 3, {0: 1})
+        try:
+            # stable candidate: 1 round x (1 positive + 1 nxdomain)
+            # unstable candidate: 3 rounds x 2
+            assert prepared.probes_expected == {0: 2, 1: 6}
+            assert prepared.total_probes == 8
+        finally:
+            for child in prepared.temp_dir.iterdir():
+                child.unlink()
+            prepared.temp_dir.rmdir()

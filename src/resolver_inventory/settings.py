@@ -27,6 +27,8 @@ class ValidationConfig:
     doh_parallelism: int = 20
     require_tcp_for_dns: bool = False
     require_tls_valid_for_doh: bool = True
+    revalidation_stable_days: int = 0
+    revalidation_stable_rounds: int = 1
     baseline_resolvers: list[str] = field(default_factory=lambda: ["1.1.1.1", "9.9.9.9", "8.8.8.8"])
     corpus: CorpusConfig = field(default_factory=CorpusConfig)
     dns_backend: DnsBackendConfig = field(default_factory=lambda: DnsBackendConfig())
@@ -195,6 +197,12 @@ def load_settings(path: str | Path | None = None) -> Settings:
         vc.require_tcp_for_dns = bool(v.get("require_tcp_for_dns", vc.require_tcp_for_dns))
         vc.require_tls_valid_for_doh = bool(
             v.get("require_tls_valid_for_doh", vc.require_tls_valid_for_doh)
+        )
+        vc.revalidation_stable_days = int(
+            v.get("revalidation_stable_days", vc.revalidation_stable_days)
+        )
+        vc.revalidation_stable_rounds = int(
+            v.get("revalidation_stable_rounds", vc.revalidation_stable_rounds)
         )
         if "baseline" in v:
             vc.baseline_resolvers = list(v["baseline"].get("resolvers", vc.baseline_resolvers))

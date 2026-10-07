@@ -23,6 +23,8 @@ parallelism = 50
 doh_parallelism = 20
 require_tcp_for_dns = false
 require_tls_valid_for_doh = true
+revalidation_stable_days = 7
+revalidation_stable_rounds = 1
 
 [validation.dns_backend]
 kind = "python"

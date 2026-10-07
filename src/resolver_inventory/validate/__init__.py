@@ -164,6 +164,61 @@ class _ValidationAccumulator:
         self.store.close()
 
 
+def _compute_rounds_map(
+    candidates: list[Candidate],
+    settings: Settings,
+    history_connection: Any,
+    run_date: Any,
+) -> dict[int, int] | None:
+    """Return per-candidate probe rounds for stable resolvers, or None.
+
+    When ``revalidation_stable_days`` is > 0 and history is available, a
+    resolver with at least that many consecutive accepted days and no current
+    fail streak gets ``revalidation_stable_rounds`` rounds instead of the
+    configured ``rounds``. Returns None when the policy is disabled or
+    history is unavailable so callers can use the configured default.
+    """
+    stable_days = settings.validation.revalidation_stable_days
+    if stable_days <= 0 or history_connection is None or run_date is None:
+        return None
+    full_rounds = settings.validation.rounds
+    stable_rounds = max(1, settings.validation.revalidation_stable_rounds)
+    if stable_rounds >= full_rounds:
+        return None
+
+    from resolver_inventory.history import (
+        get_resolver_stability_metrics,
+        normalize_resolver_key,
+    )
+
+    rounds_map: dict[int, int] = {}
+    for idx, candidate in enumerate(candidates):
+        try:
+            metrics = get_resolver_stability_metrics(
+                history_connection,
+                normalize_resolver_key(candidate),
+                run_date,
+            )
+        except Exception:
+            metrics = None
+        if (
+            metrics is not None
+            and metrics.consecutive_success_days >= stable_days
+            and metrics.consecutive_fail_days == 0
+        ):
+            rounds_map[idx] = stable_rounds
+    if not rounds_map:
+        return None
+    logger.info(
+        "revalidation: %d/%d candidates stable for %d+ days, using %d round(s)",
+        len(rounds_map),
+        len(candidates),
+        stable_days,
+        stable_rounds,
+    )
+    return rounds_map
+
+
 def _candidate_probe_count(candidate: Candidate, corpus: Corpus, rounds: int) -> int:
     round_probes = len(corpus.positive) + len(corpus.nxdomain)
     if candidate.transport == "doh":
@@ -331,6 +386,7 @@ def _prepare_plain_dns_work(
     candidates: list[Candidate],
     corpus: Corpus,
     rounds: int,
+    rounds_map: dict[int, int] | None = None,
 ) -> _PreparedPlainDnsWork:
     temp_dir = Path(tempfile.mkdtemp(prefix="resolver-inventory-plain-"))
     rdtype_paths: dict[str, Path] = {}
@@ -344,11 +400,14 @@ def _prepare_plain_dns_work(
 
     try:
         for idx, candidate in enumerate(candidates):
-            probes_expected[idx] = _candidate_probe_count(candidate, corpus, rounds)
+            candidate_rounds = rounds if rounds_map is None else rounds_map.get(idx, rounds)
+            probes_expected[idx] = _candidate_probe_count(candidate, corpus, candidate_rounds)
             total_probes += probes_expected[idx]
             if candidate.transport == "doh":
                 continue
-            for spec in _iter_plain_dns_specs_for_candidate(candidate, idx, corpus, rounds):
+            for spec in _iter_plain_dns_specs_for_candidate(
+                candidate, idx, corpus, candidate_rounds
+            ):
                 if supports_massdns_phase1(spec):
                     path = rdtype_paths.setdefault(
                         spec.rdtype,
@@ -449,6 +508,7 @@ async def _run_doh_phase(
     corpus: Corpus,
     baseline_cache: dict[tuple[str, str], list[str]],
     accumulator: _ValidationAccumulator,
+    rounds_map: dict[int, int] | None = None,
 ) -> None:
     timeout_s = settings.validation.timeout_ms / 1000.0
     baseline_resolvers = settings.validation.baseline_resolvers
@@ -468,7 +528,9 @@ async def _run_doh_phase(
                     candidate,
                     idx,
                     corpus,
-                    settings.validation.rounds,
+                    settings.validation.rounds
+                    if rounds_map is None
+                    else rounds_map.get(idx, settings.validation.rounds),
                 )
             )
         if not tasks:
@@ -557,7 +619,18 @@ async def _validate_candidates_async(
     if not candidates:
         return
 
-    prepared = _prepare_plain_dns_work(candidates, corpus, settings.validation.rounds)
+    rounds_map = _compute_rounds_map(
+        candidates,
+        settings,
+        history_connection,
+        run_date,
+    )
+    prepared = _prepare_plain_dns_work(
+        candidates,
+        corpus,
+        settings.validation.rounds,
+        rounds_map,
+    )
     accumulator = _ValidationAccumulator(
         candidates,
         prepared.probes_expected,
@@ -674,7 +747,14 @@ async def _validate_candidates_async(
             baseline_cache=baseline_cache,
             on_execution=_record_execution,
         )
-        await _run_doh_phase(candidates, settings, corpus, baseline_cache, accumulator)
+        await _run_doh_phase(
+            candidates,
+            settings,
+            corpus,
+            baseline_cache,
+            accumulator,
+            rounds_map,
+        )
         accumulator.finalize_remaining()
     finally:
         accumulator.close()

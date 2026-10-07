@@ -130,3 +130,12 @@ class TestLoadSettings:
         monkeypatch.setenv("RESOLVER_INVENTORY_CONFIG", str(cfg))
         s = load_settings(None)
         assert s.validation.rounds == 7
+
+    def test_load_validation_revalidation_config(self, tmp_path: Path) -> None:
+        cfg = tmp_path / "config.toml"
+        cfg.write_bytes(
+            b"[validation]\nrevalidation_stable_days = 7\nrevalidation_stable_rounds = 1\n"
+        )
+        s = load_settings(cfg)
+        assert s.validation.revalidation_stable_days == 7
+        assert s.validation.revalidation_stable_rounds == 1
