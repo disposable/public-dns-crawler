@@ -630,6 +630,14 @@ async def run_massdns_rdtype_session(
             break
         if _count_remaining() == 0 or remaining_before == 0:
             break
+        if restarts >= max(0, config.max_restarts):
+            logger.warning(
+                "massdns session rdtype=%s hit restart limit %d with %d unresolved probes",
+                rdtype,
+                config.max_restarts,
+                _count_remaining(),
+            )
+            break
         restarts += 1
         logger.warning(
             "massdns session rdtype=%s exited non-zero, restarting unresolved probes",

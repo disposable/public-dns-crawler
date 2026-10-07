@@ -32,7 +32,10 @@ def canonicalize_doh_url(raw: str) -> str:
         return ""
 
     host = parsed.hostname.lower()
-    port = parsed.port
+    try:
+        port = parsed.port
+    except ValueError:
+        return ""
     if ":" in host and not host.startswith("["):
         host_for_netloc = f"[{host}]"
     else:

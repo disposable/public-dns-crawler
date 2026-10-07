@@ -350,6 +350,11 @@ def _validate_probe_logic(probe: ProbeDefinition) -> None:
 
 
 def _parse_resolver(endpoint: str) -> tuple[str, int]:
+    if endpoint.startswith("["):
+        host, sep, rest = endpoint[1:].partition("]")
+        if sep and rest.startswith(":"):
+            return host, int(rest[1:])
+        return host, 53
     if ":" in endpoint and endpoint.count(":") == 1:
         host, port = endpoint.rsplit(":", 1)
         return host, int(port)

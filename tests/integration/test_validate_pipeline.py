@@ -80,13 +80,9 @@ class TestValidateCandidatesCorpusLifecycle:
 
         async def fake_run_plain_dns_specs(
             specs: list[object],
-            settings: object,
-            *,
-            timeout_s: float,
-            baseline_resolvers: list[str],
-            baseline_cache: dict[tuple[str, str], list[str]],
-            on_execution=None,
+            **kwargs: object,
         ) -> list[object]:
+            on_execution = kwargs["on_execution"]
             assert on_execution is not None
             for spec in specs:
                 await on_execution(
@@ -110,7 +106,7 @@ class TestValidateCandidatesCorpusLifecycle:
             spy_build_corpus,
         )
         monkeypatch.setattr(
-            "resolver_inventory.validate._run_plain_dns_specs",
+            "resolver_inventory.validate.run_python_plain_dns_batch",
             fake_run_plain_dns_specs,
         )
 
@@ -128,13 +124,9 @@ class TestValidateCandidatesCorpusLifecycle:
 
         async def fake_run_plain_dns_specs(
             specs: list[object],
-            settings: object,
-            *,
-            timeout_s: float,
-            baseline_resolvers: list[str],
-            baseline_cache: dict[tuple[str, str], list[str]],
-            on_execution=None,
+            **kwargs: object,
         ) -> list[object]:
+            on_execution = kwargs["on_execution"]
             assert on_execution is not None
             for spec in specs:
                 await on_execution(
@@ -154,7 +146,7 @@ class TestValidateCandidatesCorpusLifecycle:
             return []
 
         monkeypatch.setattr(
-            "resolver_inventory.validate._run_plain_dns_specs",
+            "resolver_inventory.validate.run_python_plain_dns_batch",
             fake_run_plain_dns_specs,
         )
 
@@ -178,13 +170,9 @@ class TestValidateCandidatesCorpusLifecycle:
 
         async def fake_run_plain_dns_specs(
             specs: list[object],
-            settings: object,
-            *,
-            timeout_s: float,
-            baseline_resolvers: list[str],
-            baseline_cache: dict[tuple[str, str], list[str]],
-            on_execution=None,
+            **kwargs: object,
         ) -> list[object]:
+            on_execution = kwargs["on_execution"]
             assert on_execution is not None
             for spec in reversed(specs):
                 await on_execution(
@@ -204,7 +192,7 @@ class TestValidateCandidatesCorpusLifecycle:
             return []
 
         monkeypatch.setattr(
-            "resolver_inventory.validate._run_plain_dns_specs",
+            "resolver_inventory.validate.run_python_plain_dns_batch",
             fake_run_plain_dns_specs,
         )
 

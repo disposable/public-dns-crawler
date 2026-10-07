@@ -46,6 +46,7 @@ class DnsBackendConfig:
     batch_max_queries: int = 50000
     stderr_log_level: str = "debug"
     fallback_to_python_on_error: bool = True
+    max_restarts: int = 3
 
 
 @dataclass
@@ -244,6 +245,9 @@ def load_settings(path: str | Path | None = None) -> Settings:
                     "fallback_to_python_on_error",
                     vc.dns_backend.fallback_to_python_on_error,
                 )
+            )
+            vc.dns_backend.max_restarts = int(
+                dns_backend.get("max_restarts", vc.dns_backend.max_restarts)
             )
 
     if "scoring" in raw:

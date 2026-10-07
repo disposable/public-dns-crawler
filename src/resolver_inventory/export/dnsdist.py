@@ -12,9 +12,14 @@ _HEADER = """\
 """
 
 
+def _format_host_port(host: str, port: int) -> str:
+    return f"[{host}]:{port}" if ":" in host else f"{host}:{port}"
+
+
 def _dns_backend(host: str, port: int, provider: str | None) -> str:
     comment = f"  -- {provider}" if provider else ""
-    return f'newServer({{address="{host}:{port}", checkName="dns.msftncsi.com."}}){comment}'
+    address = _format_host_port(host, port)
+    return f'newServer({{address="{address}", checkName="dns.msftncsi.com."}}){comment}'
 
 
 def _doh_backend(result: ValidationResult) -> str:
@@ -25,7 +30,7 @@ def _doh_backend(result: ValidationResult) -> str:
     provider = c.provider or ""
     lines = [
         "newServer({",
-        f'  address="{c.host}:{c.port}",',
+        f'  address="{_format_host_port(c.host, c.port)}",',
         '  tls="openssl",',
         f'  subjectName="{sni}",',
         f'  dohPath="{path}",',

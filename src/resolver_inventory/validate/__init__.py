@@ -20,7 +20,11 @@ from resolver_inventory.models import Candidate, ProbeResult, ValidationResult
 from resolver_inventory.settings import Settings
 from resolver_inventory.util.http import build_doh_client
 from resolver_inventory.util.logging import get_logger
-from resolver_inventory.validate.base import render_probe_qname, resolve_baseline_answers
+from resolver_inventory.validate.base import (
+    fail_probe,
+    render_probe_qname,
+    resolve_baseline_answers,
+)
 from resolver_inventory.validate.corpus import Corpus, CorpusEntry, build_corpus
 from resolver_inventory.validate.doh import (
     _build_wire,
@@ -286,10 +290,7 @@ async def _run_plain_dns_specs(
             )
         )
 
-    for rdtype in ("A", "AAAA", "NS"):
-        batch = supported_by_rdtype.get(rdtype)
-        if not batch:
-            continue
+    for _rdtype, batch in sorted(supported_by_rdtype.items()):
         try:
             results, _ = await run_massdns_batch(
                 batch,
@@ -427,8 +428,6 @@ async def _execute_doh_probe(
             doh_clients[task.candidate_idx],
             candidate.endpoint_url or "",
         )
-    from resolver_inventory.validate.base import fail_probe
-
     return fail_probe(f"unknown:{task.kind}", "internal_error")
 
 
@@ -490,14 +489,31 @@ async def _run_doh_phase(
                 except asyncio.QueueEmpty:
                     return
                 try:
-                    result = await _execute_doh_probe(
-                        task,
-                        timeout_s,
-                        baseline_resolvers,
-                        baseline_cache,
-                        doh_clients,
-                    )
+                    try:
+                        result = await _execute_doh_probe(
+                            task,
+                            timeout_s,
+                            baseline_resolvers,
+                            baseline_cache,
+                            doh_clients,
+                        )
+                    except Exception as exc:
+                        logger.warning(
+                            "DoH %s probe for %s raised: %s",
+                            task.kind,
+                            task.candidate.host,
+                            exc,
+                        )
+                        result = fail_probe(
+                            f"doh:{task.kind}",
+                            f"internal_error:{exc!s:.120}",
+                        )
                     await accumulator.record_probe(task.candidate_idx, result)
+                except Exception:
+                    logger.exception(
+                        "DoH worker failed to record probe result for %s",
+                        task.candidate.host,
+                    )
                 finally:
                     queue.task_done()
 
@@ -547,6 +563,9 @@ async def _validate_candidates_async(
         prepared.python_plain_total,
     )
 
+    async def _record_execution(execution: PlainDnsProbeExecution) -> None:
+        await accumulator.record_probe(execution.spec.candidate_idx, execution.result)
+
     try:
         if settings.validation.dns_backend.kind == "massdns":
             summary = {
@@ -559,22 +578,38 @@ async def _validate_candidates_async(
                 "massdns_terminal_failures_matched": 0,
                 "massdns_unmatched_results": 0,
             }
-            for rdtype in ("A", "AAAA", "NS"):
-                path = prepared.rdtype_paths.get(rdtype)
-                if path is None or not path.exists():
+            for rdtype in sorted(prepared.rdtype_paths):
+                path = prepared.rdtype_paths[rdtype]
+                if not path.exists():
                     continue
                 summary["massdns_sessions_started"] += 1
-                _, metrics = await run_massdns_rdtype_session(
-                    lambda path=path: _iter_spilled_specs(path),
-                    rdtype=rdtype,
-                    config=settings.validation.dns_backend,
-                    timeout_s=timeout_s,
-                    baseline_resolvers=baseline_resolvers,
-                    baseline_cache=baseline_cache,
-                    on_execution=lambda execution: accumulator.record_probe(
-                        execution.spec.candidate_idx, execution.result
-                    ),
-                )
+                try:
+                    _, metrics = await run_massdns_rdtype_session(
+                        lambda path=path: _iter_spilled_specs(path),
+                        rdtype=rdtype,
+                        config=settings.validation.dns_backend,
+                        timeout_s=timeout_s,
+                        baseline_resolvers=baseline_resolvers,
+                        baseline_cache=baseline_cache,
+                        on_execution=_record_execution,
+                    )
+                except Exception:
+                    if not settings.validation.dns_backend.fallback_to_python_on_error:
+                        raise
+                    summary["massdns_sessions_failed"] += 1
+                    logger.exception(
+                        "massdns session rdtype=%s crashed; falling back to python backend",
+                        rdtype,
+                    )
+                    await _run_python_plain_specs_from_file(
+                        path,
+                        settings,
+                        timeout_s=timeout_s,
+                        baseline_resolvers=baseline_resolvers,
+                        baseline_cache=baseline_cache,
+                        on_execution=_record_execution,
+                    )
+                    continue
                 logger.debug(
                     (
                         "massdns session rdtype=%s sent=%d parsed=%d stdout_lines=%d "
@@ -602,6 +637,18 @@ async def _validate_candidates_async(
             logger.debug("massdns summary: %s", summary)
         else:
             logger.debug("massdns summary: backend disabled")
+            # The massdns-supported spill files contain all UDP/53 specs; the
+            # python backend can execute every one of them, so nothing may be
+            # skipped here or those probes would never run.
+            for path in sorted(prepared.rdtype_paths.values()):
+                await _run_python_plain_specs_from_file(
+                    path,
+                    settings,
+                    timeout_s=timeout_s,
+                    baseline_resolvers=baseline_resolvers,
+                    baseline_cache=baseline_cache,
+                    on_execution=_record_execution,
+                )
 
         await _run_python_plain_specs_from_file(
             prepared.unsupported_path,
@@ -609,9 +656,7 @@ async def _validate_candidates_async(
             timeout_s=timeout_s,
             baseline_resolvers=baseline_resolvers,
             baseline_cache=baseline_cache,
-            on_execution=lambda execution: accumulator.record_probe(
-                execution.spec.candidate_idx, execution.result
-            ),
+            on_execution=_record_execution,
         )
         await _run_doh_phase(candidates, settings, corpus, baseline_cache, accumulator)
         accumulator.finalize_remaining()

@@ -7,6 +7,9 @@ from pathlib import Path
 
 from resolver_inventory.models import Candidate
 from resolver_inventory.sources.base import BaseSource
+from resolver_inventory.util.logging import get_logger
+
+logger = get_logger(__name__)
 
 
 class ManualDnsSource(BaseSource):
@@ -25,8 +28,11 @@ class ManualDnsSource(BaseSource):
             line = raw_line.strip()
             if not line or line.startswith("#"):
                 continue
-            host, _, port_str = line.partition(":")
-            port = int(port_str) if port_str else 53
+            parsed = _parse_dns_seed_line(line)
+            if parsed is None:
+                logger.warning("manual-dns: skipping invalid seed line %r", line)
+                continue
+            host, port = parsed
             for transport in ("dns-udp", "dns-tcp"):
                 results.append(
                     Candidate(
@@ -34,7 +40,7 @@ class ManualDnsSource(BaseSource):
                         source=self.SOURCE_NAME,
                         transport=transport,  # type: ignore[arg-type]
                         endpoint_url=None,
-                        host=host.strip(),
+                        host=host,
                         port=port,
                         path=None,
                     )
@@ -102,12 +108,35 @@ class ManualDohSource(BaseSource):
         return results
 
 
+def _parse_dns_seed_line(line: str) -> tuple[str, int] | None:
+    """Parse a seed line in `IP[:port]`, `[v6]:port`, or bare IPv6 form."""
+    if line.startswith("["):
+        host, sep, rest = line[1:].partition("]")
+        if not sep or (rest and not rest.startswith(":")):
+            return None
+        port_str = rest[1:]
+    elif line.count(":") == 1:
+        host, _, port_str = line.partition(":")
+    else:
+        host, port_str = line, ""
+    host = host.strip()
+    if not host:
+        return None
+    try:
+        return host, int(port_str) if port_str else 53
+    except ValueError:
+        return None
+
+
 def _parse_doh_url(url: str) -> tuple[str, int, str]:
     """Extract (host, port, path) from a DoH URL."""
     from urllib.parse import urlparse
 
     parsed = urlparse(url)
     host = parsed.hostname or ""
-    port = parsed.port or (443 if parsed.scheme == "https" else 80)
+    try:
+        port = parsed.port or (443 if parsed.scheme == "https" else 80)
+    except ValueError:
+        port = 443 if parsed.scheme == "https" else 80
     path = parsed.path or "/dns-query"
     return host, port, path

@@ -47,6 +47,18 @@ def _split_output_path(path: Path, index: int) -> Path:
     return path.with_name(f"{base}.part-{index:04d}{suffix}")
 
 
+def _cleanup_split_parts(path: Path, max_index: int) -> None:
+    """Remove `.part-NNNN` files left over from a previous export."""
+    base, suffix = _base_and_suffix(path)
+    for part in path.parent.glob(f"{base}.part-*{suffix}"):
+        try:
+            index = int(part.stem.rsplit(".part-", 1)[1])
+        except (ValueError, IndexError):
+            continue
+        if index > max_index:
+            part.unlink(missing_ok=True)
+
+
 def _write_chunked_json(path: Path, payload: list[dict], max_file_bytes: int) -> None:
     if max_file_bytes < 3:
         raise ValueError("max_file_bytes must be at least 3")
@@ -81,15 +93,19 @@ def _write_chunked_json(path: Path, payload: list[dict], max_file_bytes: int) ->
     # keep empty payload behavior as a single JSON file.
     if not chunks:
         path.write_text("[]", encoding="utf-8")
+        _cleanup_split_parts(path, 0)
         return
 
     if len(chunks) == 1:
         path.write_text(f"[{b','.join(chunks[0]).decode('utf-8')}]", encoding="utf-8")
+        _cleanup_split_parts(path, 0)
         return
 
+    path.unlink(missing_ok=True)
     for index, chunk in enumerate(chunks, start=1):
         split_path = _split_output_path(path, index)
         split_path.write_text(f"[{b','.join(chunk).decode('utf-8')}]", encoding="utf-8")
+    _cleanup_split_parts(path, len(chunks))
 
 
 class StreamingJsonArrayWriter:
@@ -123,11 +139,14 @@ class StreamingJsonArrayWriter:
 
     def close(self) -> None:
         if self.handle is None:
+            self.path.parent.mkdir(parents=True, exist_ok=True)
             self.path.write_text("[]", encoding="utf-8")
+            _cleanup_split_parts(self.path, 0)
             return
         self.handle.write("]")
         self.handle.close()
         self.handle = None
+        _cleanup_split_parts(self.path, self.part_index if self.using_split_paths else 0)
 
     def _open_current(self) -> None:
         self.current_path.parent.mkdir(parents=True, exist_ok=True)

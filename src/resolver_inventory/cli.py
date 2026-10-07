@@ -369,6 +369,9 @@ def cmd_split_candidates(args: argparse.Namespace) -> int:
     candidates = [candidate_from_dict(record) for record in load_json_list(args.input)]
     candidates.sort(key=_candidate_sort_key)
 
+    if args.shards < 1:
+        raise ValueError("--shards must be at least 1")
+
     output_dir = Path(args.output_dir)
     output_dir.mkdir(parents=True, exist_ok=True)
     shard_count = args.shards

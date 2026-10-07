@@ -1008,11 +1008,12 @@ def get_resolver_stability_metrics(
     consecutive_success_days = 0
     consecutive_fail_days = 0
     latest_status = None
+    streak_anchor = consecutive_rows[0][0] if consecutive_rows else None
 
     for i, (row_date, status) in enumerate(consecutive_rows):
         if i == 0:
             latest_status = status
-        expected_date = run_date - timedelta(days=i)
+        expected_date = streak_anchor - timedelta(days=i) if streak_anchor else row_date
         if row_date != expected_date:
             # Gap in history, stop counting
             break

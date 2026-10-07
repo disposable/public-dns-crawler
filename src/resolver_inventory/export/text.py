@@ -7,6 +7,10 @@ from pathlib import Path
 from resolver_inventory.models import ValidationResult
 
 
+def _format_host_port(host: str, port: int) -> str:
+    return f"[{host}]:{port}" if ":" in host else f"{host}:{port}"
+
+
 def export_text(
     results: list[ValidationResult],
     *,
@@ -26,7 +30,7 @@ def export_text(
     for r in records:
         c = r.candidate
         if c.transport in ("dns-udp", "dns-tcp") and not include_doh:
-            lines.append(f"{c.host}:{c.port}")
+            lines.append(_format_host_port(c.host, c.port))
         elif c.transport == "doh" and include_doh:
             lines.append(c.endpoint_url or f"https://{c.host}:{c.port}{c.path}")
 

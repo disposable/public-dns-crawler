@@ -73,6 +73,9 @@ def _parse_doh_url(url: str) -> tuple[str, int, str]:
 
     parsed = urlparse(url)
     host = parsed.hostname or ""
-    port = parsed.port or 443
+    try:
+        port = parsed.port or 443
+    except ValueError:
+        port = 443
     path = parsed.path or "/dns-query"
     return host, port, path
