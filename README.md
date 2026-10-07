@@ -137,6 +137,9 @@ require_tcp_for_dns = false            # when true, accepted dns-udp results req
                                        # an accepted dns-tcp result on the same host:port
 require_tls_valid_for_doh = true       # when false, DoH TLS failures are penalties
                                        # only instead of hard failures
+revalidation_stable_days = 0           # >0: resolvers with this many consecutive
+                                       # accepted days get reduced probe rounds
+revalidation_stable_rounds = 1         # rounds used for stable resolvers
 
 [validation.dns_backend]
 kind = "python"                       # default backend; "massdns" is optional
@@ -505,6 +508,8 @@ These helper scripts are used by the parent data repo workflow and are intention
 The crawler maintains historical data in `meta/history.duckdb` using DuckDB. The history system tracks resolver status over time to support:
 
 1. **Score history caps** - resolvers with insufficient observation history get capped scores
+   and, when `revalidation_stable_days` is enabled, resolvers with sustained accepted
+   history get probed with fewer rounds
 2. **DNS host quarantine** - hosts rejected for 14+ consecutive days are temporarily excluded
 3. **Stability metrics** - streaks, flapping detection, and success rate tracking
 
