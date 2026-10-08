@@ -13,8 +13,8 @@ def _format_host_port(host: str, port: int) -> str:
     return f"[{host}]:{port}" if ":" in host else f"{host}:{port}"
 
 
-def _format_dot_endpoint(host: str, port: int, tls_server_name: str | None) -> str:
-    """Render a DoT endpoint as ``tls://host[:port][#tls_name]``.
+def _format_tls_endpoint(scheme: str, host: str, port: int, tls_server_name: str | None) -> str:
+    """Render a DoT/DoQ endpoint as ``<scheme>://host[:port][#tls_name]``.
 
     The ``#name`` suffix carries the TLS authentication name when it differs
     from the connect host (for example an IP endpoint with a certificate
@@ -26,7 +26,15 @@ def _format_dot_endpoint(host: str, port: int, tls_server_name: str | None) -> s
     name_suffix = ""
     if tls_server_name and tls_server_name != host:
         name_suffix = f"#{tls_server_name}"
-    return f"tls://{display_host}{suffix}{name_suffix}"
+    return f"{scheme}://{display_host}{suffix}{name_suffix}"
+
+
+def _format_dot_endpoint(host: str, port: int, tls_server_name: str | None) -> str:
+    return _format_tls_endpoint("tls", host, port, tls_server_name)
+
+
+def _format_doq_endpoint(host: str, port: int, tls_server_name: str | None) -> str:
+    return _format_tls_endpoint("quic", host, port, tls_server_name)
 
 
 def export_text(
@@ -44,6 +52,7 @@ def export_text(
     - ``"dns"`` (default): plain DNS resolvers as ``host:port``
     - ``"doh"``: DoH resolvers as full HTTPS endpoint URLs
     - ``"dot"``: DoT resolvers as ``tls://host[:port][#name]``
+    - ``"doq"``: DoQ resolvers as ``quic://host[:port][#name]``
 
     *include_doh* is a deprecated alias for ``transport="doh"``.
     Returns the text. If *path* is given, also writes it to disk.
@@ -60,6 +69,8 @@ def export_text(
             lines.append(c.endpoint_url or f"https://{c.host}:{c.port}{c.path}")
         elif c.transport == "dot" and transport == "dot":
             lines.append(_format_dot_endpoint(c.host, c.port, c.tls_server_name))
+        elif c.transport == "doq" and transport == "doq":
+            lines.append(_format_doq_endpoint(c.host, c.port, c.tls_server_name))
 
     seen: set[str] = set()
     deduped: list[str] = []

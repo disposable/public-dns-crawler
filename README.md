@@ -1,12 +1,12 @@
-# Public DNS, DoT, and DoH resolver crawler
+# Public DNS, DoT, DoQ, and DoH resolver crawler
 
-Aggregate, validate, score, and export public DNS, DoT, and DoH resolvers.
+Aggregate, validate, score, and export public DNS, DoT, DoQ, and DoH resolvers.
 
 ## Features
 
-- **Multi-source discovery** - plain DNS from public-dns.info, DoH from curl wiki and AdGuard provider lists, DoT from the AdGuard provider list, manual seed files
+- **Multi-source discovery** - plain DNS from public-dns.info and the AdGuard provider list, DoH from the curl wiki, AdGuard, and DNSCrypt resolver lists, DoT and DoQ from the AdGuard provider list, manual seed files
 - **Pre-validation filtering records** - source and normalization drops are exported as `filtered.json` with reason codes
-- **Full endpoint metadata** - DoH records preserve URL, host, port, path, TLS server name, bootstrap IPs, and provenance; DoT records preserve host, port, TLS server name, and bootstrap IPs
+- **Full endpoint metadata** - DoH records preserve URL, host, port, path, TLS server name, bootstrap IPs, and provenance; DoT/DoQ records preserve host, port, TLS server name, and bootstrap IPs
 - **Active validation** - reachability, NXDOMAIN fidelity, latency, consistency, TLS validity
 - **Capability tags** - non-scoring measurements (DNSSEC validation, ECS support, filtering detection) exported as a `capabilities` object per result
 - **Pluggable test corpus** - controlled zone, local external JSON corpus, or tiny built-in fallback
@@ -19,13 +19,17 @@ Default discovery sources configured in `configs/default.toml`:
 
 - `publicdns_info` (plain DNS): <https://public-dns.info/nameservers.csv>
   - default filter: `min_reliability = 0.50`
+- `adguard` (plain DNS): same providers markdown, `DNS, IPv4`/`DNS, IPv6` rows
 - `curl_wiki` (DoH): <https://raw.githubusercontent.com/wiki/curl/curl/DNS-over-HTTPS.md>
 - `adguard` (DoH): <https://raw.githubusercontent.com/AdguardTeam/KnowledgeBaseDNS/master/docs/general/dns-providers.md>
-- `adguard` (DoT): same AdGuard providers markdown, `tls://` rows
+- `adguard` (DoT): same AdGuard providers markdown, `tls://` rows (including `Hostname:`/`IP:`-prefixed cells; `IP:`/`IPv6:` fields become bootstrap addresses)
+- `adguard` (DoQ): same AdGuard providers markdown, `quic://` rows
+- `dnscrypt` (DoH/DoT/DoQ/plain): <https://raw.githubusercontent.com/DNSCrypt/dnscrypt-resolvers/master/v3/public-resolvers.md> - `sdns://` stamps decoded per the DNS Stamps spec; enabled for `doh` by default
 - `manual` seeds (local files):
   - `configs/manual-dns.txt`
   - `configs/manual-doh.toml`
   - `configs/manual-dot.toml`
+  - `configs/manual-doq.toml` (same schema as manual-dot)
 
 ## Quick start
 
@@ -91,7 +95,8 @@ For multi-VM flows (for example GitHub Actions matrix validation), use:
 - `resolvers.txt` - accepted plain DNS resolvers only, as `host:port`
 - `resolvers-doh.txt` - accepted DoH resolvers only, as full HTTPS endpoints
 - `resolvers-dot.txt` - accepted DoT resolvers only, as `tls://host[:port][#tls-name]`
-- `dnsdist.conf` - dnsdist backends for all non-rejected resolvers (plain DNS, DoT, and DoH sections)
+- `resolvers-doq.txt` - accepted DoQ resolvers only, as `quic://host[:port][#tls-name]`
+- `dnsdist.conf` - dnsdist backends for all non-rejected resolvers (plain DNS, DoT, and DoH sections; dnsdist has no DoQ backend protocol, so DoQ resolvers appear only in text/JSON exports)
 - `unbound-forward.conf` - accepted plain DNS resolvers rendered as Unbound forward zones
 - `unbound-forward-dot.conf` - accepted DoT resolvers rendered as an Unbound TLS forward zone (`forward-tls-upstream: yes`)
 
@@ -124,11 +129,17 @@ min_reliability = 0.50         # drop unstable entries below this reliability sc
 type = "manual"
 path = "configs/manual-dns.txt"
 
+[[sources.dns]]
+type = "adguard"               # DNS, IPv4/IPv6 rows from the providers list
+
 [[sources.doh]]
 type = "curl_wiki"             # scrape curl's DoH providers page
 
 [[sources.doh]]
 type = "adguard"               # fetch AdGuard providers markdown list
+
+[[sources.doh]]
+type = "dnscrypt"              # DoH stamps in the DNSCrypt public-resolvers list
 
 [[sources.doh]]
 type = "manual"
@@ -141,17 +152,26 @@ type = "adguard"               # parse tls:// rows from the same AdGuard list
 type = "manual"
 path = "configs/manual-dot.toml"
 
+[[sources.doq]]
+type = "adguard"               # parse quic:// rows from the same AdGuard list
+
+[[sources.doq]]
+type = "manual"
+path = "configs/manual-doq.toml"
+
 [validation]
 rounds = 3
 timeout_ms = 2000
 parallelism = 50
 doh_parallelism = 20
 dot_parallelism = 15
+doq_parallelism = 15
 require_tcp_for_dns = false            # when true, accepted dns-udp results require
                                        # an accepted dns-tcp result on the same host:port
 require_tls_valid_for_doh = true       # when false, DoH TLS failures are penalties
                                        # only instead of hard failures
 require_tls_valid_for_dot = true       # same, for DoT
+require_tls_valid_for_doq = true       # same, for DoQ
 revalidation_stable_days = 0           # >0: resolvers with this many consecutive
                                        # accepted days get reduced probe rounds
 revalidation_stable_rounds = 1         # rounds used for stable resolvers
@@ -212,6 +232,7 @@ MassDNS phase-1 routing limitations:
 - `dns-tcp` and non-53 plain DNS probes automatically use the python backend.
 - `doh` probes always use the existing DoH path.
 - `dot` probes always use the DoT path (`dns.asyncquery.tls`); MassDNS cannot do TLS.
+- `doq` probes always use the DoQ path (`dns.asyncquery.quic`, requires `aioquic`).
 - `latency_ms` on MassDNS can have lower fidelity depending on output fields.
 
 Install MassDNS before enabling it:
@@ -296,6 +317,9 @@ flowchart TD
     Q -->|dns-udp or dns-tcp| R[validate_dns_candidate]
     Q -->|doh| S[validate_doh_candidate]
     Q -->|dot| D[validate_dot_candidate]
+    Q -->|doq| X[validate_doq_candidate]
+
+    X --> X1[QUIC handshake with SNI and cert validation<br/>same corpus probes as DoT]
 
     R --> R1[run positive probes]
     R1 --> R2{expected_mode}
@@ -327,11 +351,12 @@ flowchart TD
     T --> U[export outputs]
 ```
 
-`validate_dns_candidate`, `validate_doh_candidate`, and `validate_dot_candidate` all consume
+`validate_dns_candidate`, `validate_doh_candidate`, `validate_dot_candidate`, and
+`validate_doq_candidate` all consume
 the same prebuilt corpus, but they execute transport-specific query code. `exact_rrset` probes
 compare directly against pinned answers, `consensus_match` probes compare the candidate against
 the configured trusted baseline resolvers, and `negative_generated` probes keep the template in
-the corpus and expand a fresh query name at execution time. DoT candidates may use IP literals
+the corpus and expand a fresh query name at execution time. DoT/DoQ candidates may use IP literals
 or hostnames; hostname endpoints resolve once per validation window (or use configured
 `bootstrap_ipv4`/`bootstrap_ipv6` addresses) and validate the certificate against
 `tls_server_name` (defaulting to the host).
@@ -341,8 +366,8 @@ or hostnames; hostname endpoints resolve once per validation window (or use conf
 | Code | Meaning |
 |---|---|
 | `nxdomain_spoofing` | Resolver returned NOERROR for a nonexistent name |
-| `tls_name_mismatch` | DoH/DoT TLS certificate does not match the expected server name |
-| `tls_error` | DoH/DoT TLS handshake or certificate validation failed |
+| `tls_name_mismatch` | DoH/DoT/DoQ TLS certificate does not match the expected server name |
+| `tls_error` | DoH/DoT/DoQ TLS handshake or certificate validation failed |
 | `timeout_rate_high` | More than 50% of probes timed out |
 | `latency_p95_high` | 95th-percentile latency exceeds 2 s |
 | `unexpected_nxdomain` | Resolver returned NXDOMAIN for a name that should exist |
@@ -595,6 +620,7 @@ History is tracked per-endpoint using a canonical `resolver_key`:
 - **DoT**: `dot|host|port` (e.g., `dot|dns.quad9.net|853`), or
   `dot|host|port|tls_name` when the TLS authentication name differs from
   the connect host (e.g., `dot|9.9.9.9|853|dns.quad9.net`)
+- **DoQ**: `doq|host|port`, or `doq|host|port|tls_name` (same rules as DoT)
 - **DoH**: `doh|url` (e.g., `doh|https://dns.example.com/dns-query`)
 
 This allows:

@@ -63,6 +63,7 @@ def normalize_resolver_key(candidate: Candidate) -> str:
     - dot|host|port  (or dot|host|port|tls_name when the TLS auth name
       differs from the host - endpoints on the same address with different
       certificate identities are distinct resolvers)
+    - doq|host|port  (same tls_name rule as dot)
     - doh|url (canonicalized)
 
     This allows distinguishing:
@@ -75,8 +76,8 @@ def normalize_resolver_key(candidate: Candidate) -> str:
         if not url:
             url = candidate.endpoint_url or ""
         return f"doh|{url}"
-    elif candidate.transport == "dot":
-        key = f"dot|{candidate.host}|{candidate.port}"
+    elif candidate.transport in ("dot", "doq"):
+        key = f"{candidate.transport}|{candidate.host}|{candidate.port}"
         tls_name = candidate.tls_server_name or candidate.host
         if tls_name != candidate.host:
             key += f"|{tls_name}"
@@ -98,12 +99,12 @@ def parse_resolver_key(resolver_key: str) -> tuple[str, str, int | None]:
     if transport == "doh":
         return (transport, remainder, None)
 
-    # DoT keys may carry a fourth "|tls_name" segment; it is part of the
+    # DoT/DoQ keys may carry a fourth "|tls_name" segment; it is part of the
     # resolver identity, not the host or port, so it is ignored here.
     parts = remainder.split("|")
     host = parts[0]
     port_text = parts[1] if len(parts) > 1 else ""
-    default_port = 853 if transport == "dot" else 53
+    default_port = 853 if transport in ("dot", "doq") else 53
     try:
         port = int(port_text) if port_text else default_port
     except ValueError:

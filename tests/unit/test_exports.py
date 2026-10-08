@@ -92,6 +92,32 @@ def _dot_result(
     )
 
 
+def _doq_result(
+    host: str = "dns.example.com",
+    port: int = 853,
+    tls_server_name: str | None = "dns.example.com",
+    accepted: bool = True,
+) -> ValidationResult:
+    c = Candidate(
+        provider="ExampleDoQ",
+        source="test",
+        transport="doq",
+        endpoint_url=None,
+        host=host,
+        port=port,
+        path=None,
+        tls_server_name=tls_server_name,
+    )
+    return ValidationResult(
+        candidate=c,
+        accepted=accepted,
+        score=92,
+        status="accepted" if accepted else "rejected",
+        reasons=[],
+        probes=[ProbeResult(ok=True, probe="doq:positive:test", latency_ms=15.0)],
+    )
+
+
 class TestJsonExport:
     def test_accepted_only_default(self) -> None:
         results = [_dns_result(accepted=True), _dns_result("192.0.2.2", accepted=False)]
@@ -300,6 +326,29 @@ class TestTextExport:
         )
         assert "tls://[2001:db8::1]#dns.example.com" in text
         assert "tls://2001:db8::1" not in text
+
+    def test_doq_endpoints_rendered_as_quic_urls(self) -> None:
+        text = export_text([_doq_result()], transport="doq")
+        assert "quic://dns.example.com" in text
+
+    def test_doq_ip_endpoint_with_tls_name(self) -> None:
+        text = export_text(
+            [_doq_result(host="94.140.14.14", tls_server_name="dns.adguard-dns.com")],
+            transport="doq",
+        )
+        assert "quic://94.140.14.14#dns.adguard-dns.com" in text
+
+    def test_doq_ipv6_endpoint_is_bracketed(self) -> None:
+        text = export_text(
+            [_doq_result(host="2a10:50c0::ad1:ff", tls_server_name="dns.adguard-dns.com")],
+            transport="doq",
+        )
+        assert "quic://[2a10:50c0::ad1:ff]#dns.adguard-dns.com" in text
+
+    def test_doq_excluded_from_other_exports(self) -> None:
+        assert "quic://" not in export_text([_doq_result()])
+        assert "quic://" not in export_text([_doq_result()], transport="dot")
+        assert "quic://" not in export_text([_doq_result()], transport="doh")
 
 
 class TestDnsdistExport:

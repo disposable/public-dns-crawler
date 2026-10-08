@@ -6,11 +6,17 @@ min_reliability = 0.50
 type = "manual"
 path = "configs/manual-dns.txt"
 
+[[sources.dns]]
+type = "adguard"
+
 [[sources.doh]]
 type = "curl_wiki"
 
 [[sources.doh]]
 type = "adguard"
+
+[[sources.doh]]
+type = "dnscrypt"
 
 [[sources.doh]]
 type = "manual"
@@ -23,15 +29,24 @@ type = "adguard"
 type = "manual"
 path = "configs/manual-dot.toml"
 
+[[sources.doq]]
+type = "adguard"
+
+[[sources.doq]]
+type = "manual"
+path = "configs/manual-doq.toml"
+
 [validation]
 rounds = 3
 timeout_ms = 2000
 parallelism = 50
 doh_parallelism = 20
 dot_parallelism = 15
+doq_parallelism = 15
 require_tcp_for_dns = false
 require_tls_valid_for_doh = true
 require_tls_valid_for_dot = true
+require_tls_valid_for_doq = true
 revalidation_stable_days = 7
 revalidation_stable_rounds = 1
 

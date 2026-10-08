@@ -475,6 +475,38 @@ class TestResolverKeyNormalization:
         assert host == "dns.quad9.net"
         assert port == 853
 
+    def test_normalize_doq_key_hostname(self) -> None:
+        candidate = Candidate(
+            provider=None,
+            source="test",
+            transport="doq",
+            endpoint_url=None,
+            host="dns.adguard-dns.com",
+            port=853,
+            path=None,
+            tls_server_name="dns.adguard-dns.com",
+        )
+        assert normalize_resolver_key(candidate) == "doq|dns.adguard-dns.com|853"
+
+    def test_normalize_doq_key_ip_with_tls_name(self) -> None:
+        candidate = Candidate(
+            provider=None,
+            source="test",
+            transport="doq",
+            endpoint_url=None,
+            host="94.140.14.14",
+            port=853,
+            path=None,
+            tls_server_name="dns.adguard-dns.com",
+        )
+        assert normalize_resolver_key(candidate) == "doq|94.140.14.14|853|dns.adguard-dns.com"
+
+    def test_parse_doq_key_default_port(self) -> None:
+        transport, host, port = parse_resolver_key("doq|dns.adguard-dns.com")
+        assert transport == "doq"
+        assert host == "dns.adguard-dns.com"
+        assert port == 853
+
     def test_same_host_different_transports_different_keys(self) -> None:
         """Same host on UDP and TCP should have different resolver_keys."""
         udp_candidate = Candidate(

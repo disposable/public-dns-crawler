@@ -26,6 +26,7 @@ classifiers = [
   "Topic :: System :: Networking",
 ]
 dependencies = [
+  "aioquic>=1.2,<2",
   "dnspython>=2.7",
   "duckdb>=1.5.4",
   "httpx[http2]>=0.28.1",

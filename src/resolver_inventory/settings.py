@@ -38,9 +38,11 @@ class ValidationConfig:
     parallelism: int = 50
     doh_parallelism: int = 20
     dot_parallelism: int = 15
+    doq_parallelism: int = 15
     require_tcp_for_dns: bool = False
     require_tls_valid_for_doh: bool = True
     require_tls_valid_for_dot: bool = True
+    require_tls_valid_for_doq: bool = True
     revalidation_stable_days: int = 0
     revalidation_stable_rounds: int = 1
     baseline_resolvers: list[str] = field(default_factory=lambda: ["1.1.1.1", "9.9.9.9", "8.8.8.8"])
@@ -161,6 +163,7 @@ class SourcesConfig:
     dns: list[SourceEntry] = field(default_factory=list)
     doh: list[SourceEntry] = field(default_factory=list)
     dot: list[SourceEntry] = field(default_factory=list)
+    doq: list[SourceEntry] = field(default_factory=list)
 
 
 @dataclass
@@ -203,6 +206,7 @@ def load_settings(path: str | Path | None = None) -> Settings:
         settings.sources.dns = _parse_source_list(list(src.get("dns", [])))
         settings.sources.doh = _parse_source_list(list(src.get("doh", [])))
         settings.sources.dot = _parse_source_list(list(src.get("dot", [])))
+        settings.sources.doq = _parse_source_list(list(src.get("doq", [])))
 
     if "validation" in raw:
         v = raw["validation"]
@@ -212,12 +216,16 @@ def load_settings(path: str | Path | None = None) -> Settings:
         vc.parallelism = int(v.get("parallelism", vc.parallelism))
         vc.doh_parallelism = int(v.get("doh_parallelism", vc.doh_parallelism))
         vc.dot_parallelism = int(v.get("dot_parallelism", vc.dot_parallelism))
+        vc.doq_parallelism = int(v.get("doq_parallelism", vc.doq_parallelism))
         vc.require_tcp_for_dns = bool(v.get("require_tcp_for_dns", vc.require_tcp_for_dns))
         vc.require_tls_valid_for_doh = bool(
             v.get("require_tls_valid_for_doh", vc.require_tls_valid_for_doh)
         )
         vc.require_tls_valid_for_dot = bool(
             v.get("require_tls_valid_for_dot", vc.require_tls_valid_for_dot)
+        )
+        vc.require_tls_valid_for_doq = bool(
+            v.get("require_tls_valid_for_doq", vc.require_tls_valid_for_doq)
         )
         vc.revalidation_stable_days = int(
             v.get("revalidation_stable_days", vc.revalidation_stable_days)

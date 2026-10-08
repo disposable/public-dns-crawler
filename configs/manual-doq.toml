@@ -1,0 +1,33 @@
+# Manual DoQ (DNS-over-QUIC) endpoint seeds.
+# Each [[endpoints]] entry must have at minimum a `host` field.
+# Example:
+# [[endpoints]]
+# host = "dns.example.com"
+# port = 853
+# provider = "Example"
+# tls_server_name = "dns.example.com"   # defaults to host when it is a hostname
+# bootstrap_ipv4 = ["1.2.3.4"]
+
+[[endpoints]]
+host = "dns.adguard-dns.com"
+port = 853
+provider = "AdGuard DNS"
+
+[[endpoints]]
+host = "dns.quad9.net"
+port = 853
+provider = "Quad9"
+
+[[endpoints]]
+host = "94.140.14.14"
+port = 853
+provider = "AdGuard DNS"
+tls_server_name = "dns.adguard-dns.com"
+bootstrap_ipv4 = ["94.140.14.14"]
+
+[[endpoints]]
+host = "94.140.15.15"
+port = 853
+provider = "AdGuard DNS"
+tls_server_name = "dns.adguard-dns.com"
+bootstrap_ipv4 = ["94.140.15.15"]

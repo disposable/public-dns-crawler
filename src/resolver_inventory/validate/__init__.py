@@ -41,6 +41,11 @@ from resolver_inventory.validate.doh import (
     _probe_positive_doh,
     _probe_tls,
 )
+from resolver_inventory.validate.doq import (
+    _probe_nxdomain_doq,
+    _probe_positive_doq,
+    _query_doq_candidate,
+)
 from resolver_inventory.validate.dot import (
     _probe_nxdomain_dot,
     _probe_positive_dot,
@@ -352,6 +357,24 @@ def _iter_dot_tasks_for_candidate(
             yield _DoHProbeTask("dot_positive", idx, candidate, entry)
         for entry in corpus.nxdomain:
             yield _DoHProbeTask("dot_nxdomain", idx, candidate, entry)
+    for name in capability_names or []:
+        yield _DoHProbeTask("capability", idx, candidate, name)
+
+
+def _iter_doq_tasks_for_candidate(
+    candidate: Candidate,
+    idx: int,
+    corpus: Corpus,
+    rounds: int,
+    capability_names: list[str] | None = None,
+) -> Iterator[_DoHProbeTask]:
+    if candidate.transport != "doq":
+        return
+    for _ in range(rounds):
+        for entry in corpus.positive:
+            yield _DoHProbeTask("doq_positive", idx, candidate, entry)
+        for entry in corpus.nxdomain:
+            yield _DoHProbeTask("doq_nxdomain", idx, candidate, entry)
     for name in capability_names or []:
         yield _DoHProbeTask("capability", idx, candidate, name)
 
@@ -681,6 +704,73 @@ async def _execute_dot_probe(
     return fail_probe(f"unknown:{task.kind}", "internal_error")
 
 
+async def _execute_doq_probe(
+    task: _DoHProbeTask,
+    timeout_s: float,
+    baseline_resolvers: list[str],
+    baseline_cache: dict[tuple[str, str], list[str]],
+    capabilities_config: CapabilitiesConfig,
+    addr_cache: dict[str, list[str]] | None = None,
+    addr_locks: dict[str, asyncio.Lock] | None = None,
+) -> ProbeResult:
+    candidate = task.candidate
+    if task.kind == "doq_positive":
+        assert isinstance(task.entry, CorpusEntry)
+        return await _probe_positive_doq(
+            task.entry,
+            candidate,
+            timeout_s,
+            baseline_resolvers,
+            baseline_cache,
+            addr_cache,
+            addr_locks,
+        )
+    if task.kind == "doq_nxdomain":
+        assert isinstance(task.entry, CorpusEntry)
+        return await _probe_nxdomain_doq(task.entry, candidate, timeout_s, addr_cache, addr_locks)
+    if task.kind == "capability":
+
+        async def _send(
+            qname: str,
+            rdtype: str,
+            *,
+            want_dnssec: bool = False,
+            ecs: tuple[str, int] | None = None,
+        ) -> dns.message.Message:
+            options: list[dns.edns.Option] | None = None
+            if ecs is not None:
+                options = [dns.edns.ECSOption(ecs[0], ecs[1])]
+            msg = dns.message.make_query(
+                qname,
+                dns.rdatatype.from_text(rdtype),
+                use_edns=0 if (want_dnssec or ecs is not None) else None,
+                want_dnssec=want_dnssec,
+                options=options,
+            )
+            msg.id = 0
+            resp, _ = await _query_doq_candidate(
+                candidate,
+                msg,
+                timeout_s,
+                addr_cache,
+                addr_locks,
+            )
+            return resp
+
+        async def _baseline(qname: str, rdtype: str) -> list[str]:
+            return await resolve_baseline_answers(
+                qname, rdtype, baseline_resolvers, timeout_s, baseline_cache
+            )
+
+        return await run_capability_check(
+            str(task.entry),
+            _send,
+            capabilities_config,
+            resolve_baseline=_baseline,
+        )
+    return fail_probe(f"unknown:{task.kind}", "internal_error")
+
+
 async def _run_doh_phase(
     candidates: list[Candidate],
     settings: Settings,
@@ -894,6 +984,106 @@ async def _run_dot_phase(
                     await wt
 
 
+async def _run_doq_phase(
+    candidates: list[Candidate],
+    settings: Settings,
+    corpus: Corpus,
+    baseline_cache: dict[tuple[str, str], list[str]],
+    accumulator: _ValidationAccumulator,
+    rounds_map: dict[int, int] | None = None,
+    capability_names: list[str] | None = None,
+) -> None:
+    timeout_s = settings.validation.timeout_ms / 1000.0
+    baseline_resolvers = settings.validation.baseline_resolvers
+    window_size = max(1, settings.validation.doq_parallelism)
+
+    for start_idx in range(0, len(candidates), window_size):
+        window = candidates[start_idx : start_idx + window_size]
+        tasks: list[_DoHProbeTask] = []
+        addr_cache: dict[str, list[str]] = {}
+        addr_locks: dict[str, asyncio.Lock] = {}
+        for offset, candidate in enumerate(window):
+            idx = start_idx + offset
+            if candidate.transport != "doq":
+                continue
+            tasks.extend(
+                _iter_doq_tasks_for_candidate(
+                    candidate,
+                    idx,
+                    corpus,
+                    settings.validation.rounds
+                    if rounds_map is None
+                    else rounds_map.get(idx, settings.validation.rounds),
+                    capability_names,
+                )
+            )
+        if not tasks:
+            continue
+
+        queue: asyncio.Queue[_DoHProbeTask] = asyncio.Queue()
+        for task in tasks:
+            queue.put_nowait(task)
+
+        async def worker(
+            queue: asyncio.Queue[_DoHProbeTask] = queue,
+            addr_cache: dict[str, list[str]] = addr_cache,
+            addr_locks: dict[str, asyncio.Lock] = addr_locks,
+        ) -> None:
+            while True:
+                try:
+                    task = queue.get_nowait()
+                except asyncio.QueueEmpty:
+                    return
+                try:
+                    try:
+                        result = await _execute_doq_probe(
+                            task,
+                            timeout_s,
+                            baseline_resolvers,
+                            baseline_cache,
+                            settings.validation.capabilities,
+                            addr_cache,
+                            addr_locks,
+                        )
+                    except Exception as exc:
+                        logger.warning(
+                            "DoQ %s probe for %s raised: %s",
+                            task.kind,
+                            task.candidate.host,
+                            exc,
+                        )
+                        # Keep the capability: prefix so a crashed check is
+                        # still partitioned out of scoring math.
+                        fallback_name = (
+                            f"capability:{task.entry}"
+                            if task.kind == "capability"
+                            else f"doq:{task.kind}"
+                        )
+                        result = fail_probe(
+                            fallback_name,
+                            f"internal_error:{exc!s:.120}",
+                        )
+                    await accumulator.record_probe(task.candidate_idx, result)
+                except Exception:
+                    logger.exception(
+                        "DoQ worker failed to record probe result for %s",
+                        task.candidate.host,
+                    )
+                finally:
+                    queue.task_done()
+
+        worker_count = max(1, min(settings.validation.doq_parallelism, len(tasks)))
+        worker_tasks = [asyncio.create_task(worker()) for _ in range(worker_count)]
+        try:
+            await queue.join()
+        finally:
+            for wt in worker_tasks:
+                wt.cancel()
+            for wt in worker_tasks:
+                with contextlib.suppress(asyncio.CancelledError):
+                    await wt
+
+
 async def _validate_candidates_async(
     candidates: list[Candidate],
     settings: Settings,
@@ -1048,6 +1238,15 @@ async def _validate_candidates_async(
             capability_names,
         )
         await _run_dot_phase(
+            candidates,
+            settings,
+            corpus,
+            baseline_cache,
+            accumulator,
+            rounds_map,
+            capability_names,
+        )
+        await _run_doq_phase(
             candidates,
             settings,
             corpus,

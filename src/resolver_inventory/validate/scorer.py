@@ -669,12 +669,15 @@ def score(
             reasons=reasons,
         )
 
-    # Honor require_tls_valid_for_doh/dot: when false, TLS-validity failures
-    # keep their correctness penalty but do not hard-fail the candidate.
+    # Honor require_tls_valid_for_doh/dot/doq: when false, TLS-validity
+    # failures keep their correctness penalty but do not hard-fail the
+    # candidate.
     hard_fail_reasons = _HARD_FAIL_REASONS
     if candidate.transport == "doh" and not settings.validation.require_tls_valid_for_doh:
         hard_fail_reasons = _HARD_FAIL_REASONS - _TLS_VALIDITY_REASONS
     elif candidate.transport == "dot" and not settings.validation.require_tls_valid_for_dot:
+        hard_fail_reasons = _HARD_FAIL_REASONS - _TLS_VALIDITY_REASONS
+    elif candidate.transport == "doq" and not settings.validation.require_tls_valid_for_doq:
         hard_fail_reasons = _HARD_FAIL_REASONS - _TLS_VALIDITY_REASONS
     has_hard_fail = _has_hard_fail(reasons, hard_fail_reasons)
     if has_hard_fail and final_score > 59:

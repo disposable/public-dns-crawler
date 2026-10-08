@@ -5,7 +5,7 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from typing import Literal
 
-Transport = Literal["dns-udp", "dns-tcp", "dot", "doh"]
+Transport = Literal["dns-udp", "dns-tcp", "dot", "doq", "doh"]
 Status = Literal["accepted", "candidate", "rejected"]
 FilterReason = Literal[
     "source_reliability_below_min",
@@ -15,6 +15,8 @@ FilterReason = Literal[
     "duplicate_doh_candidate",
     "invalid_dot_endpoint",
     "duplicate_dot_candidate",
+    "invalid_doq_endpoint",
+    "duplicate_doq_candidate",
     "historical_dns_quarantine",
 ]
 FilterStage = Literal["source", "normalize", "history"]
@@ -39,9 +41,9 @@ class Candidate:
     def __str__(self) -> str:
         if self.transport == "doh":
             return f"doh:{self.endpoint_url}"
-        if self.transport == "dot":
+        if self.transport in ("dot", "doq"):
             name = self.tls_server_name or self.host
-            return f"dot:{self.host}:{self.port}#{name}"
+            return f"{self.transport}:{self.host}:{self.port}#{name}"
         return f"{self.transport}:{self.host}:{self.port}"
 
 

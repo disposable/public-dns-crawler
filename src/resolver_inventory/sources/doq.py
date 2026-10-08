@@ -1,4 +1,11 @@
-"""Source adapters for DoT (DNS-over-TLS) resolver endpoints."""
+"""Source adapters for DNS-over-QUIC resolver discovery.
+
+Two adapters:
+- ``AdGuardDoqSource`` parses ``quic://`` rows from AdGuard's providers
+  markdown (including ``Hostname:``-prefixed cells and ``IP:``/``IPv6:``
+  bootstrap addresses).
+- ``ManualDoqSource`` loads endpoints from a local TOML file.
+"""
 
 from __future__ import annotations
 
@@ -10,39 +17,33 @@ from urllib.parse import unquote, urlparse
 from resolver_inventory.models import Candidate
 from resolver_inventory.sources.adguard import PROVIDERS_URL
 from resolver_inventory.sources.base import BaseSource
+from resolver_inventory.sources.dot import _HEADING_RE, _dot_row_cells
 from resolver_inventory.util.logging import get_logger
 from resolver_inventory.util.retry import fetch_url
 
 logger = get_logger(__name__)
 
-_HEADING_RE = re.compile(r"^###\s+(?P<provider>.+?)\s*$")
-# Rows whose first table cell starts with DNS-over-TLS (covers variants such
-# as "DNS-over-TLS, IPv4" and "DNS-over-TLS - Family").
-_DOT_ROW_RE = re.compile(r"^\|\s*DNS-over-TLS[^|]*\|")
-_TLS_URL_RE = re.compile(r"`(tls://[^`]+)`")
+# Rows whose first table cell starts with DNS-over-QUIC.
+_DOQ_ROW_RE = re.compile(r"^\|\s*DNS-over-QUIC[^|]*\|")
+_QUIC_URL_RE = re.compile(r"`(quic://[^`]+)`")
 _HOSTNAME_FIELD_RE = re.compile(r"\bHostname:\s*`([^`]+)`")
 _IPV4_FIELD_RE = re.compile(r"\bIP:\s*`([^`]+)`")
 _IPV6_FIELD_RE = re.compile(r"\bIPv6:\s*`([^`]+)`")
 
-DEFAULT_DOT_PORT = 853
+DEFAULT_DOQ_PORT = 853
 
 
-def _dot_row_cells(line: str) -> list[str]:
-    """Split a markdown table row into stripped cell contents."""
-    return [c.strip() for c in line.strip().strip("|").split("|")]
+class AdGuardDoqSource(BaseSource):
+    """Fetch AdGuard's DNS providers markdown and yield DoQ candidates."""
 
-
-class AdGuardDotSource(BaseSource):
-    """Fetch AdGuard's DNS providers markdown and yield DoT candidates."""
-
-    SOURCE_NAME = "adguard-dot"
+    SOURCE_NAME = "adguard-doq"
 
     def candidates(self) -> list[Candidate]:
         url = self.entry.url or self.entry.extra.get("url") or PROVIDERS_URL
         try:
             data = fetch_url(url, timeout=30).decode("utf-8", errors="replace")
         except Exception as exc:
-            logger.warning("adguard-dot fetch failed: %s", exc)
+            logger.warning("adguard-doq fetch failed: %s", exc)
             return []
 
         current_provider: str | None = None
@@ -55,26 +56,25 @@ class AdGuardDotSource(BaseSource):
                 current_provider = heading.group("provider").strip("* ")
                 continue
 
-            if not _DOT_ROW_RE.match(stripped):
+            if not _DOQ_ROW_RE.match(stripped):
                 continue
             cells = _dot_row_cells(stripped)
             if len(cells) < 2:
                 continue
             cell = cells[1]
 
-            urls = _TLS_URL_RE.findall(cell)
+            urls = _QUIC_URL_RE.findall(cell)
             if not urls:
-                # Some rows give a bare hostname without the tls:// scheme.
                 host_field = _HOSTNAME_FIELD_RE.search(cell)
                 if host_field:
                     name = host_field.group(1)
-                    urls = [name if name.startswith("tls://") else f"tls://{name}"]
+                    urls = [name if name.startswith("quic://") else f"quic://{name}"]
             bootstrap_ipv4 = _IPV4_FIELD_RE.findall(cell)
             bootstrap_ipv6 = _IPV6_FIELD_RE.findall(cell)
 
             for raw_url in urls:
                 endpoint = raw_url.rstrip(".,;)")
-                host, port, tls_name = _parse_dot_url(endpoint)
+                host, port, tls_name = _parse_doq_url(endpoint)
                 if not host:
                     continue
                 key = (host, port, tls_name or "")
@@ -85,7 +85,7 @@ class AdGuardDotSource(BaseSource):
                     Candidate(
                         provider=current_provider,
                         source=self.SOURCE_NAME,
-                        transport="dot",
+                        transport="doq",
                         endpoint_url=None,
                         host=host,
                         port=port,
@@ -95,12 +95,12 @@ class AdGuardDotSource(BaseSource):
                         tls_server_name=tls_name or host,
                     )
                 )
-        logger.info("adguard-dot: found %d DoT endpoints", len(results))
+        logger.info("adguard-doq: found %d DoQ endpoints", len(results))
         return results
 
 
-class ManualDotSource(BaseSource):
-    """Load DoT endpoints from a TOML file.
+class ManualDoqSource(BaseSource):
+    """Load DoQ endpoints from a TOML file.
 
     Expected TOML structure::
 
@@ -112,7 +112,7 @@ class ManualDotSource(BaseSource):
         bootstrap_ipv4 = ["1.2.3.4"]
     """
 
-    SOURCE_NAME = "manual-dot"
+    SOURCE_NAME = "manual-doq"
 
     def candidates(self) -> list[Candidate]:
         if not self.entry.path:
@@ -129,14 +129,14 @@ class ManualDotSource(BaseSource):
             if not host:
                 continue
             try:
-                port = int(item.get("port", DEFAULT_DOT_PORT))  # type: ignore[arg-type]
+                port = int(item.get("port", DEFAULT_DOQ_PORT))  # type: ignore[arg-type]
             except (TypeError, ValueError):
-                port = DEFAULT_DOT_PORT
+                port = DEFAULT_DOQ_PORT
             results.append(
                 Candidate(
                     provider=str(item["provider"]) if "provider" in item else None,
                     source=self.SOURCE_NAME,
-                    transport="dot",
+                    transport="doq",
                     endpoint_url=None,
                     host=host,
                     port=port,
@@ -164,12 +164,12 @@ class ManualDotSource(BaseSource):
         return results
 
 
-def _parse_dot_url(url: str) -> tuple[str, int, str | None]:
-    """Extract (host, port, tls_name) from a tls:// DoT URL.
+def _parse_doq_url(url: str) -> tuple[str, int, str | None]:
+    """Extract (host, port, tls_name) from a quic:// DoQ URL.
 
     A ``#name`` fragment carries the TLS authentication name for IP-literal
-    endpoints (``tls://9.9.9.9#dns.quad9.net``), matching the convention
-    used by the text exporter, Unbound, and systemd-resolved.
+    endpoints (``quic://9.9.9.9#dns.quad9.net``), matching the tls://
+    convention.
 
     Returns ``("", 0, None)`` for malformed URLs so callers skip the row;
     urlparse raises on unbalanced IPv6 brackets and invalid ports.
@@ -177,7 +177,7 @@ def _parse_dot_url(url: str) -> tuple[str, int, str | None]:
     try:
         parsed = urlparse(url)
         host = parsed.hostname or ""
-        port = parsed.port or DEFAULT_DOT_PORT
+        port = parsed.port or DEFAULT_DOQ_PORT
     except ValueError:
         return "", 0, None
     tls_name = unquote(parsed.fragment).strip() if parsed.fragment else None

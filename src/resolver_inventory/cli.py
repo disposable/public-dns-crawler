@@ -234,6 +234,7 @@ def cmd_discover(args: argparse.Namespace) -> int:
     from resolver_inventory.export.json import export_filtered_json
     from resolver_inventory.normalize.dns import normalize_dns_candidates
     from resolver_inventory.normalize.doh import normalize_doh_candidates
+    from resolver_inventory.normalize.doq import normalize_doq_candidates
     from resolver_inventory.normalize.dot import normalize_dot_candidates
     from resolver_inventory.serialization import candidate_to_dict, write_json
     from resolver_inventory.settings import load_settings
@@ -245,13 +246,15 @@ def cmd_discover(args: argparse.Namespace) -> int:
     dns_c = normalize_dns_candidates(discovery.candidates, filtered=filtered_candidates)
     doh_c = normalize_doh_candidates(discovery.candidates, filtered=filtered_candidates)
     dot_c = normalize_dot_candidates(discovery.candidates, filtered=filtered_candidates)
-    all_c = dns_c + doh_c + dot_c
+    doq_c = normalize_doq_candidates(discovery.candidates, filtered=filtered_candidates)
+    all_c = dns_c + doh_c + dot_c + doq_c
     logger.info(
-        "Discovered %d candidates (%d DNS, %d DoH, %d DoT)",
+        "Discovered %d candidates (%d DNS, %d DoH, %d DoT, %d DoQ)",
         len(all_c),
         len(dns_c),
         len(doh_c),
         len(dot_c),
+        len(doq_c),
     )
     _github_output("candidates_total", str(len(all_c)))
     _github_output("filtered_total", str(len(filtered_candidates)))
@@ -327,6 +330,7 @@ def cmd_validate(args: argparse.Namespace) -> int:
     )
     from resolver_inventory.normalize.dns import normalize_dns_candidates
     from resolver_inventory.normalize.doh import normalize_doh_candidates
+    from resolver_inventory.normalize.doq import normalize_doq_candidates
     from resolver_inventory.normalize.dot import normalize_dot_candidates
     from resolver_inventory.serialization import candidate_from_dict, load_json_list
     from resolver_inventory.settings import load_settings
@@ -350,6 +354,7 @@ def cmd_validate(args: argparse.Namespace) -> int:
             normalize_dns_candidates(raw_candidates)
             + normalize_doh_candidates(raw_candidates)
             + normalize_dot_candidates(raw_candidates)
+            + normalize_doq_candidates(raw_candidates)
         )
         candidates.sort(key=lambda candidate: _validation_candidate_sort_key(candidate, settings))
         logger.info("Discovered %d normalized candidates", len(candidates))
@@ -547,10 +552,12 @@ def cmd_materialize_results(args: argparse.Namespace) -> int:
         resolvers_path = out_dir / "resolvers.txt"
         doh_path = out_dir / "resolvers-doh.txt"
         dot_path = out_dir / "resolvers-dot.txt"
+        doq_path = out_dir / "resolvers-doq.txt"
         export_text(results, path=resolvers_path)
         export_text(results, transport="doh", path=doh_path)
         export_text(results, transport="dot", path=dot_path)
-        exported_files.extend([str(resolvers_path), str(doh_path), str(dot_path)])
+        export_text(results, transport="doq", path=doq_path)
+        exported_files.extend([str(resolvers_path), str(doh_path), str(dot_path), str(doq_path)])
     if "dnsdist" in formats:
         dnsdist_path = out_dir / "dnsdist.conf"
         export_dnsdist(results, path=dnsdist_path)
@@ -582,6 +589,7 @@ def cmd_refresh(args: argparse.Namespace) -> int:
     from resolver_inventory.export.unbound import export_unbound
     from resolver_inventory.normalize.dns import normalize_dns_candidates
     from resolver_inventory.normalize.doh import normalize_doh_candidates
+    from resolver_inventory.normalize.doq import normalize_doq_candidates
     from resolver_inventory.normalize.dot import normalize_dot_candidates
     from resolver_inventory.settings import load_settings
     from resolver_inventory.sources import discover_candidates_with_filtered
@@ -608,6 +616,10 @@ def cmd_refresh(args: argparse.Namespace) -> int:
             filtered=filtered_candidates,
         )
         + normalize_dot_candidates(
+            discovery.candidates,
+            filtered=filtered_candidates,
+        )
+        + normalize_doq_candidates(
             discovery.candidates,
             filtered=filtered_candidates,
         )
@@ -689,10 +701,12 @@ def cmd_refresh(args: argparse.Namespace) -> int:
         p1 = out_dir / "resolvers.txt"
         p2 = out_dir / "resolvers-doh.txt"
         p3 = out_dir / "resolvers-dot.txt"
+        p4 = out_dir / "resolvers-doq.txt"
         export_text(results, path=p1)
         export_text(results, transport="doh", path=p2)
         export_text(results, transport="dot", path=p3)
-        exported_files.extend([str(p1), str(p2), str(p3)])
+        export_text(results, transport="doq", path=p4)
+        exported_files.extend([str(p1), str(p2), str(p3), str(p4)])
     if "dnsdist" in formats:
         p = out_dir / "dnsdist.conf"
         export_dnsdist(results, path=p)
@@ -1023,7 +1037,7 @@ def _build_parser() -> argparse.ArgumentParser:
     p_export.add_argument("--output", "-o", metavar="FILE", help="Write output here")
     p_export.add_argument(
         "--transport",
-        choices=["dns", "dot", "doh"],
+        choices=["dns", "dot", "doq", "doh"],
         metavar="T",
         help="Endpoint family for 'text' exports (default: dns)",
     )

@@ -5,6 +5,7 @@ from __future__ import annotations
 from resolver_inventory.models import Candidate, FilteredCandidate
 from resolver_inventory.normalize.dns import normalize_dns_candidates
 from resolver_inventory.normalize.doh import normalize_doh_candidates
+from resolver_inventory.normalize.doq import normalize_doq_candidates
 from resolver_inventory.normalize.dot import normalize_dot_candidates
 
 
@@ -302,3 +303,71 @@ class TestNormalizeDot:
     def test_tls_server_name_normalized(self) -> None:
         result = normalize_dot_candidates([_dot("192.0.2.1", tls_server_name="DNS.Example.COM.")])
         assert result[0].tls_server_name == "dns.example.com"
+
+
+def _doq(
+    host: str,
+    port: int = 853,
+    tls_server_name: str | None = None,
+) -> Candidate:
+    return Candidate(
+        provider=None,
+        source="test",
+        transport="doq",
+        endpoint_url=None,
+        host=host,
+        port=port,
+        path=None,
+        tls_server_name=tls_server_name,
+    )
+
+
+class TestNormalizeDoq:
+    def test_hostname_endpoint(self) -> None:
+        result = normalize_doq_candidates([_doq("dns.example.com")])
+        assert len(result) == 1
+        assert result[0].host == "dns.example.com"
+        assert result[0].port == 853
+        assert result[0].tls_server_name == "dns.example.com"
+
+    def test_ip_endpoint_with_explicit_tls_name(self) -> None:
+        result = normalize_doq_candidates([_doq("1.1.1.1", tls_server_name="one.one.one.one")])
+        assert result[0].tls_server_name == "one.one.one.one"
+
+    def test_invalid_host_dropped(self) -> None:
+        filtered: list[FilteredCandidate] = []
+        result = normalize_doq_candidates([_doq("not a host!!")], filtered=filtered)
+        assert result == []
+        assert filtered[0].reason == "invalid_doq_endpoint"
+
+    def test_deduplication_uses_doq_reason(self) -> None:
+        filtered: list[FilteredCandidate] = []
+        result = normalize_doq_candidates(
+            [_doq("dns.example.com"), _doq("DNS.EXAMPLE.COM.")], filtered=filtered
+        )
+        assert len(result) == 1
+        assert filtered[0].reason == "duplicate_doq_candidate"
+
+    def test_distinct_tls_names_not_merged(self) -> None:
+        result = normalize_doq_candidates(
+            [
+                _doq("192.0.2.1", tls_server_name="a.example.com"),
+                _doq("192.0.2.1", tls_server_name="b.example.com"),
+            ]
+        )
+        assert len(result) == 2
+
+    def test_invalid_bootstrap_dropped(self) -> None:
+        filtered: list[FilteredCandidate] = []
+        c = _doq("dns.example.com")
+        c.bootstrap_ipv6 = ["192.0.2.1"]
+        result = normalize_doq_candidates([c], filtered=filtered)
+        assert result == []
+        assert filtered[0].reason == "invalid_doq_endpoint"
+
+    def test_dot_and_doq_not_cross_deduped(self) -> None:
+        """A dot and doq endpoint on the same host:port are distinct."""
+        candidates = normalize_dot_candidates([_dot("dns.example.com")]) + normalize_doq_candidates(
+            [_doq("dns.example.com")]
+        )
+        assert len(candidates) == 2
