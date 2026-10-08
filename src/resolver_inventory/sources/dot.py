@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import ipaddress
 import re
 import tomllib
 from pathlib import Path
@@ -30,6 +31,27 @@ DEFAULT_DOT_PORT = 853
 def _dot_row_cells(line: str) -> list[str]:
     """Split a markdown table row into stripped cell contents."""
     return [c.strip() for c in line.strip().strip("|").split("|")]
+
+
+def _ip_fields(values: list[str], version: int) -> list[str]:
+    """Keep only literals that parse as the given IP version.
+
+    ``IP:``/``IPv6:`` fields in the upstream markdown occasionally carry
+    ``ip:port`` or bracketed values; dropping them here keeps the endpoint
+    instead of poisoning bootstrap validation downstream.
+    """
+    out: list[str] = []
+    for raw in values:
+        token = raw.strip()
+        if token.startswith("[") and token.endswith("]"):
+            token = token[1:-1]
+        try:
+            addr = ipaddress.ip_address(token)
+        except ValueError:
+            continue
+        if addr.version == version:
+            out.append(str(addr))
+    return out
 
 
 class AdGuardDotSource(BaseSource):
@@ -69,8 +91,8 @@ class AdGuardDotSource(BaseSource):
                 if host_field:
                     name = host_field.group(1)
                     urls = [name if name.startswith("tls://") else f"tls://{name}"]
-            bootstrap_ipv4 = _IPV4_FIELD_RE.findall(cell)
-            bootstrap_ipv6 = _IPV6_FIELD_RE.findall(cell)
+            bootstrap_ipv4 = _ip_fields(_IPV4_FIELD_RE.findall(cell), 4)
+            bootstrap_ipv6 = _ip_fields(_IPV6_FIELD_RE.findall(cell), 6)
 
             for raw_url in urls:
                 endpoint = raw_url.rstrip(".,;)")

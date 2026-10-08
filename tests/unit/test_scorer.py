@@ -632,6 +632,52 @@ def _dot_candidate() -> Candidate:
     )
 
 
+def _doq_candidate() -> Candidate:
+    return Candidate(
+        provider=None,
+        source="test",
+        transport="doq",
+        endpoint_url=None,
+        host="dns.example.com",
+        port=853,
+        path=None,
+        tls_server_name="dns.example.com",
+    )
+
+
+class TestRequireTlsValidForDoq:
+    """require_tls_valid_for_doq controls whether TLS failures are fatal."""
+
+    def _probes_with_tls_failure(self) -> list[ProbeResult]:
+        return [_ok(probe="doq:positive:test") for _ in range(9)] + [
+            _fail(probe="doq:positive:test2", error="tls_name_mismatch:cert name wrong")
+        ]
+
+    def test_tls_failure_hard_fails_when_required(self) -> None:
+        settings = Settings()
+        settings.validation.require_tls_valid_for_doq = True
+        result = score(_doq_candidate(), self._probes_with_tls_failure(), settings)
+        assert result.status == "rejected"
+        assert "tls_name_mismatch" in result.reasons
+        assert "hard_fail_cap" in result.score_caps_applied
+
+    def test_tls_failure_is_soft_penalty_when_not_required(self) -> None:
+        settings = Settings()
+        settings.validation.require_tls_valid_for_doq = False
+        result = score(_doq_candidate(), self._probes_with_tls_failure(), settings)
+        assert "tls_name_mismatch" in result.reasons
+        assert "hard_fail_cap" not in result.score_caps_applied
+        assert result.status != "rejected"
+
+    def test_dot_setting_does_not_relax_doq(self) -> None:
+        # Only require_tls_valid_for_doq relaxes DoQ candidates
+        settings = Settings()
+        settings.validation.require_tls_valid_for_dot = False
+        result = score(_doq_candidate(), self._probes_with_tls_failure(), settings)
+        assert result.status == "rejected"
+        assert "hard_fail_cap" in result.score_caps_applied
+
+
 class TestRequireTlsValidForDot:
     """require_tls_valid_for_dot controls whether TLS failures are fatal."""
 

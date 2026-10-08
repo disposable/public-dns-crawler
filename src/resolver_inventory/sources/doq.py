@@ -17,7 +17,11 @@ from urllib.parse import unquote, urlparse
 from resolver_inventory.models import Candidate
 from resolver_inventory.sources.adguard import PROVIDERS_URL
 from resolver_inventory.sources.base import BaseSource
-from resolver_inventory.sources.dot import _HEADING_RE, _dot_row_cells
+from resolver_inventory.sources.dot import (
+    _HEADING_RE,
+    _dot_row_cells,
+    _ip_fields,
+)
 from resolver_inventory.util.logging import get_logger
 from resolver_inventory.util.retry import fetch_url
 
@@ -69,8 +73,8 @@ class AdGuardDoqSource(BaseSource):
                 if host_field:
                     name = host_field.group(1)
                     urls = [name if name.startswith("quic://") else f"quic://{name}"]
-            bootstrap_ipv4 = _IPV4_FIELD_RE.findall(cell)
-            bootstrap_ipv6 = _IPV6_FIELD_RE.findall(cell)
+            bootstrap_ipv4 = _ip_fields(_IPV4_FIELD_RE.findall(cell), 4)
+            bootstrap_ipv6 = _ip_fields(_IPV6_FIELD_RE.findall(cell), 6)
 
             for raw_url in urls:
                 endpoint = raw_url.rstrip(".,;)")

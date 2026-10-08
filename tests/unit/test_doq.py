@@ -93,6 +93,7 @@ class TestQueryDoqCandidate:
         assert fake.calls[0]["where"] == "94.140.14.14"
         assert fake.calls[0]["server_hostname"] == "dns.adguard-dns.com"
         assert fake.calls[0]["port"] == 853
+        assert fake.calls[0]["verify"] is True
 
     def test_bootstrap_addresses_used_without_resolution(self, monkeypatch) -> None:
         fake = _FakeQuic(answers=["192.0.2.1"])
@@ -142,6 +143,14 @@ class TestClassifyDoqTransportError:
 
         CryptoError.__module__ = "aioquic.tls"
         assert _classify_doq_transport_error(CryptoError("bad certificate")).startswith("tls_error")
+
+    def test_aioquic_hostname_mismatch_maps_tls_name_mismatch(self) -> None:
+        class AlertBadCertificate(Exception):
+            pass
+
+        AlertBadCertificate.__module__ = "aioquic.tls"
+        exc = AlertBadCertificate("hostname 'x' doesn't match 'y'")
+        assert _classify_doq_transport_error(exc).startswith("tls_name_mismatch")
 
     def test_aioquic_transport_error_maps_timeout(self) -> None:
         class ConnectionError_(Exception):
