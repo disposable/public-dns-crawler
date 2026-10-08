@@ -11,6 +11,7 @@ from resolver_inventory.models import Candidate, DiscoveryResult
 from resolver_inventory.settings import Settings, SourceEntry
 from resolver_inventory.sources.adguard import AdGuardDnsSource, AdGuardSource
 from resolver_inventory.sources.curl_wiki import CurlWikiSource
+from resolver_inventory.sources.dibdot import DibDotDohSource, DibDotDotSource
 from resolver_inventory.sources.dnscrypt import (
     DnsCryptDnsSource,
     DnsCryptDohSource,
@@ -20,6 +21,11 @@ from resolver_inventory.sources.dnscrypt import (
 from resolver_inventory.sources.doq import AdGuardDoqSource, ManualDoqSource
 from resolver_inventory.sources.dot import AdGuardDotSource, ManualDotSource
 from resolver_inventory.sources.manual import ManualDnsSource, ManualDohSource
+from resolver_inventory.sources.paulmillr import (
+    PaulMillrDnsSource,
+    PaulMillrDohSource,
+    PaulMillrDotSource,
+)
 from resolver_inventory.sources.publicdns_info import PublicDnsInfoSource
 
 _DNS_SOURCE_MAP = {
@@ -27,6 +33,7 @@ _DNS_SOURCE_MAP = {
     "publicdns_info": PublicDnsInfoSource,
     "adguard": AdGuardDnsSource,
     "dnscrypt": DnsCryptDnsSource,
+    "paulmillr": PaulMillrDnsSource,
 }
 
 _DOH_SOURCE_MAP = {
@@ -34,12 +41,16 @@ _DOH_SOURCE_MAP = {
     "curl_wiki": CurlWikiSource,
     "adguard": AdGuardSource,
     "dnscrypt": DnsCryptDohSource,
+    "paulmillr": PaulMillrDohSource,
+    "dibdot": DibDotDohSource,
 }
 
 _DOT_SOURCE_MAP = {
     "manual": ManualDotSource,
     "adguard": AdGuardDotSource,
     "dnscrypt": DnsCryptDotSource,
+    "paulmillr": PaulMillrDotSource,
+    "dibdot": DibDotDotSource,
 }
 
 _DOQ_SOURCE_MAP = {

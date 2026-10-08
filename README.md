@@ -4,7 +4,7 @@ Aggregate, validate, score, and export public DNS, DoT, DoQ, and DoH resolvers.
 
 ## Features
 
-- **Multi-source discovery** - plain DNS from public-dns.info and the AdGuard provider list, DoH from the curl wiki, AdGuard, and DNSCrypt resolver lists, DoT and DoQ from the AdGuard provider list, manual seed files
+- **Multi-source discovery** - plain DNS from public-dns.info, the AdGuard provider list, and the paulmillr/encrypted-dns profiles; DoH from the curl wiki, AdGuard, DNSCrypt resolver lists (public-resolvers, parental-control, OpenNIC), paulmillr, and the dibdot DoH blocklists; DoT from AdGuard, paulmillr, and dibdot; DoQ from the AdGuard provider list; manual seed files
 - **Pre-validation filtering records** - source and normalization drops are exported as `filtered.json` with reason codes
 - **Full endpoint metadata** - DoH records preserve URL, host, port, path, TLS server name, bootstrap IPs, and provenance; DoT/DoQ records preserve host, port, TLS server name, and bootstrap IPs
 - **Active validation** - reachability, NXDOMAIN fidelity, latency, consistency, TLS validity
@@ -24,7 +24,9 @@ Default discovery sources configured in `configs/default.toml`:
 - `adguard` (DoH): <https://raw.githubusercontent.com/AdguardTeam/KnowledgeBaseDNS/master/docs/general/dns-providers.md>
 - `adguard` (DoT): same AdGuard providers markdown, `tls://` rows (including `Hostname:`/`IP:`-prefixed cells; `IP:`/`IPv6:` fields become bootstrap addresses)
 - `adguard` (DoQ): same AdGuard providers markdown, `quic://` rows
-- `dnscrypt` (DoH/DoT/DoQ/plain): <https://raw.githubusercontent.com/DNSCrypt/dnscrypt-resolvers/master/v3/public-resolvers.md> - `sdns://` stamps decoded per the DNS Stamps spec; enabled for `doh` by default
+- `dnscrypt` (DoH/DoT/DoQ/plain): <https://raw.githubusercontent.com/DNSCrypt/dnscrypt-resolvers/master/v3/public-resolvers.md> - `sdns://` stamps decoded per the DNS Stamps spec; enabled for `doh` by default. Any file in the same format can be used via `url`; `label` overrides the recorded `source` name. The default config also enables the `parental-control.md` and `opennic.md` sibling lists
+- `paulmillr` (plain DNS/DoH/DoT): <https://github.com/paulmillr/encrypted-dns> - per-provider JSON profiles under `src/`, enumerated via the GitHub contents API. Variant `https`/`tls` endpoints plus `ServerAddresses` (also used as bootstrap IPs); variant `region`/`censorship` flow into candidate metadata
+- `dibdot` (DoH/DoT): <https://github.com/dibdot/DoH-IP-blocklists> - `doh-domains.txt` becomes `https://<domain>/dns-query` candidates; `doh-ipv4.txt`/`doh-ipv6.txt` `# hostname` comments become DoT candidates with the listed IPs as bootstrap addresses, plus DoH guesses for each commented hostname. Aggregate blocklist data - expect a lower hit rate; validation does the filtering
 - `manual` seeds (local files):
   - `configs/manual-dns.txt`
   - `configs/manual-doh.toml`
@@ -132,6 +134,9 @@ path = "configs/manual-dns.txt"
 [[sources.dns]]
 type = "adguard"               # DNS, IPv4/IPv6 rows from the providers list
 
+[[sources.dns]]
+type = "paulmillr"             # ServerAddresses in the encrypted-dns profiles
+
 [[sources.doh]]
 type = "curl_wiki"             # scrape curl's DoH providers page
 
@@ -142,11 +147,33 @@ type = "adguard"               # fetch AdGuard providers markdown list
 type = "dnscrypt"              # DoH stamps in the DNSCrypt public-resolvers list
 
 [[sources.doh]]
+type = "dnscrypt"              # same format, sibling list; label tags the source
+url = "https://raw.githubusercontent.com/DNSCrypt/dnscrypt-resolvers/master/v3/parental-control.md"
+label = "dnscrypt-parental-control"
+
+[[sources.doh]]
+type = "dnscrypt"
+url = "https://raw.githubusercontent.com/DNSCrypt/dnscrypt-resolvers/master/v3/opennic.md"
+label = "dnscrypt-opennic"
+
+[[sources.doh]]
+type = "paulmillr"             # https.ServerURLOrName in the encrypted-dns profiles
+
+[[sources.doh]]
+type = "dibdot"                # doh-domains.txt + IP-list hostname comments
+
+[[sources.doh]]
 type = "manual"
 path = "configs/manual-doh.toml"
 
 [[sources.dot]]
 type = "adguard"               # parse tls:// rows from the same AdGuard list
+
+[[sources.dot]]
+type = "paulmillr"             # tls.ServerURLOrName in the encrypted-dns profiles
+
+[[sources.dot]]
+type = "dibdot"                # hostnames from the DoH-IP blocklist comments
 
 [[sources.dot]]
 type = "manual"

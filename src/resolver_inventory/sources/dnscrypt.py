@@ -187,9 +187,17 @@ def _url_host(host: str) -> str:
 
 
 class _DnsCryptListSource(BaseSource):
-    """Fetch a DNSCrypt v3 resolver list and yield candidates of one family."""
+    """Fetch a DNSCrypt v3 resolver list and yield candidates of one family.
+
+    ``entry.url`` points at any file in the same format (public-resolvers.md,
+    parental-control.md, opennic.md, ...); ``entry.extra["label"]`` overrides
+    the ``source`` tag so sibling lists keep distinct provenance.
+    """
 
     SOURCE_NAME = "dnscrypt"
+
+    def _source_name(self) -> str:
+        return str(self.entry.extra.get("label") or self.SOURCE_NAME)
 
     def candidates(self) -> list[Candidate]:
         url = self.entry.url or self.entry.extra.get("url") or DNSCRYPT_RESOLVERS_URL
@@ -199,6 +207,7 @@ class _DnsCryptListSource(BaseSource):
             logger.warning("dnscrypt fetch failed: %s", exc)
             return []
 
+        source_name = self._source_name()
         current_provider: str | None = None
         seen: set[tuple[str, str, int, str]] = set()
         results: list[Candidate] = []
@@ -216,7 +225,7 @@ class _DnsCryptListSource(BaseSource):
                     skipped += 1
                     logger.debug("dnscrypt: skipping stamp: %s", exc)
                     continue
-                for candidate in self._candidates_for(stamp, current_provider):
+                for candidate in self._candidates_for(stamp, current_provider, source_name):
                     key = (
                         candidate.transport,
                         candidate.host,
@@ -228,13 +237,16 @@ class _DnsCryptListSource(BaseSource):
                     seen.add(key)
                     results.append(candidate)
         logger.info(
-            "dnscrypt: found %d candidates (%d stamps skipped)",
+            "%s: found %d candidates (%d stamps skipped)",
+            source_name,
             len(results),
             skipped,
         )
         return results
 
-    def _candidates_for(self, stamp: _Stamp, provider: str | None) -> list[Candidate]:
+    def _candidates_for(
+        self, stamp: _Stamp, provider: str | None, source_name: str
+    ) -> list[Candidate]:
         raise NotImplementedError
 
     def _addr_bootstrap(self, stamp: _Stamp) -> tuple[list[str], list[str]]:
@@ -246,7 +258,9 @@ class _DnsCryptListSource(BaseSource):
 class DnsCryptDnsSource(_DnsCryptListSource):
     """Plain-DNS (proto 0x00) entries from a DNSCrypt resolver list."""
 
-    def _candidates_for(self, stamp: _Stamp, provider: str | None) -> list[Candidate]:
+    def _candidates_for(
+        self, stamp: _Stamp, provider: str | None, source_name: str
+    ) -> list[Candidate]:
         if stamp.proto != PROTO_PLAIN:
             return []
         ip4, ip6 = _classify_addr(stamp.addr)
@@ -255,7 +269,7 @@ class DnsCryptDnsSource(_DnsCryptListSource):
         return [
             Candidate(
                 provider=provider,
-                source=self.SOURCE_NAME,
+                source=source_name,
                 transport=transport,  # type: ignore[arg-type]
                 endpoint_url=None,
                 host=stamp.addr,
@@ -296,14 +310,16 @@ def _tls_candidates(
 class DnsCryptDohSource(_DnsCryptListSource):
     """DoH (proto 0x02) entries from a DNSCrypt resolver list."""
 
-    def _candidates_for(self, stamp: _Stamp, provider: str | None) -> list[Candidate]:
+    def _candidates_for(
+        self, stamp: _Stamp, provider: str | None, source_name: str
+    ) -> list[Candidate]:
         if stamp.proto != PROTO_DOH:
             return []
         v4, v6 = _classify_addr(stamp.addr)
         return [
             Candidate(
                 provider=provider,
-                source=self.SOURCE_NAME,
+                source=source_name,
                 transport="doh",
                 endpoint_url=(f"https://{_url_host(stamp.hostname)}:{stamp.port}{stamp.path}"),
                 host=stamp.hostname,
@@ -319,12 +335,16 @@ class DnsCryptDohSource(_DnsCryptListSource):
 class DnsCryptDotSource(_DnsCryptListSource):
     """DoT (proto 0x03) entries from a DNSCrypt resolver list."""
 
-    def _candidates_for(self, stamp: _Stamp, provider: str | None) -> list[Candidate]:
-        return _tls_candidates(stamp, provider, PROTO_DOT, "dot", self.SOURCE_NAME)
+    def _candidates_for(
+        self, stamp: _Stamp, provider: str | None, source_name: str
+    ) -> list[Candidate]:
+        return _tls_candidates(stamp, provider, PROTO_DOT, "dot", source_name)
 
 
 class DnsCryptDoqSource(_DnsCryptListSource):
     """DoQ (proto 0x04) entries from a DNSCrypt resolver list."""
 
-    def _candidates_for(self, stamp: _Stamp, provider: str | None) -> list[Candidate]:
-        return _tls_candidates(stamp, provider, PROTO_DOQ, "doq", self.SOURCE_NAME)
+    def _candidates_for(
+        self, stamp: _Stamp, provider: str | None, source_name: str
+    ) -> list[Candidate]:
+        return _tls_candidates(stamp, provider, PROTO_DOQ, "doq", source_name)

@@ -9,6 +9,9 @@ path = "configs/manual-dns.txt"
 [[sources.dns]]
 type = "adguard"
 
+[[sources.dns]]
+type = "paulmillr"
+
 [[sources.doh]]
 type = "curl_wiki"
 
@@ -19,11 +22,33 @@ type = "adguard"
 type = "dnscrypt"
 
 [[sources.doh]]
+type = "dnscrypt"
+url = "https://raw.githubusercontent.com/DNSCrypt/dnscrypt-resolvers/master/v3/parental-control.md"
+label = "dnscrypt-parental-control"
+
+[[sources.doh]]
+type = "dnscrypt"
+url = "https://raw.githubusercontent.com/DNSCrypt/dnscrypt-resolvers/master/v3/opennic.md"
+label = "dnscrypt-opennic"
+
+[[sources.doh]]
+type = "paulmillr"
+
+[[sources.doh]]
+type = "dibdot"
+
+[[sources.doh]]
 type = "manual"
 path = "configs/manual-doh.toml"
 
 [[sources.dot]]
 type = "adguard"
+
+[[sources.dot]]
+type = "paulmillr"
+
+[[sources.dot]]
+type = "dibdot"
 
 [[sources.dot]]
 type = "manual"

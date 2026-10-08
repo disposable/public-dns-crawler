@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 import urllib.request
 
 from resolver_inventory.settings import SourceEntry
@@ -9,6 +10,7 @@ from resolver_inventory.sources.adguard import PROVIDERS_URL as ADGUARD_URL
 from resolver_inventory.sources.adguard import AdGuardDnsSource, AdGuardSource
 from resolver_inventory.sources.curl_wiki import PROVIDERS_URL as CURL_URL
 from resolver_inventory.sources.curl_wiki import CurlWikiSource
+from resolver_inventory.sources.dibdot import DIBDOT_BASE_URL, DibDotDohSource, DibDotDotSource
 from resolver_inventory.sources.dnscrypt import (
     DNSCRYPT_RESOLVERS_URL,
     DnsCryptDnsSource,
@@ -18,6 +20,12 @@ from resolver_inventory.sources.dnscrypt import (
 )
 from resolver_inventory.sources.doq import AdGuardDoqSource, ManualDoqSource
 from resolver_inventory.sources.dot import AdGuardDotSource, ManualDotSource
+from resolver_inventory.sources.paulmillr import (
+    PAULMILLR_LISTING_URL,
+    PaulMillrDnsSource,
+    PaulMillrDohSource,
+    PaulMillrDotSource,
+)
 from resolver_inventory.sources.publicdns_info import (
     DEFAULT_URL as PUBLICDNS_INFO_URL,
 )
@@ -733,3 +741,225 @@ class TestPublicDnsInfoSource:
             ("192.0.2.5", "dns-udp"),
             ("192.0.2.5", "dns-tcp"),
         ]
+
+
+class TestPaulMillrSources:
+    LISTING_URL = PAULMILLR_LISTING_URL
+
+    def _patch_fetch(self, monkeypatch, bodies: dict[str, str]) -> list[str]:
+        seen: list[str] = []
+
+        def fake_urlopen(url: str, timeout: int = 30) -> _FakeResponse:
+            seen.append(url)
+            if url == self.LISTING_URL:
+                return _FakeResponse(bodies["listing"])
+            for key, body in bodies.items():
+                if key != "listing" and url.endswith(key):
+                    return _FakeResponse(body)
+            raise OSError(f"unexpected url {url}")
+
+        monkeypatch.setattr(urllib.request, "urlopen", fake_urlopen)
+        return seen
+
+    def _bodies(self) -> dict[str, str]:
+        listing = json.dumps(
+            [
+                {
+                    "name": "01-alpha.json",
+                    "download_url": "https://example.com/01-alpha.json",
+                },
+                {
+                    "name": "02-beta.json",
+                    "download_url": "https://example.com/02-beta.json",
+                },
+                {"name": "notes.md", "download_url": "https://example.com/notes.md"},
+            ]
+        )
+        alpha = json.dumps(
+            {
+                "names": {"en": "Alpha DNS"},
+                "variants": {
+                    "default": {
+                        "ServerAddresses": ["192.0.2.1", "2001:db8::1"],
+                        "region": "EU",
+                        "censorship": True,
+                        "https": {"ServerURLOrName": "https://doh.alpha.example/dns-query"},
+                        "tls": {"ServerURLOrName": "dot.alpha.example"},
+                    }
+                },
+            }
+        )
+        beta = json.dumps(
+            {
+                "names": {"en": "Beta DNS"},
+                "variants": {
+                    "default": {
+                        "ServerAddresses": ["198.51.100.1"],
+                        "https": {"ServerURLOrName": "https://doh.beta.example/query"},
+                    },
+                    "family": {
+                        "names": {"en": "Family"},
+                        "tls": {"ServerURLOrName": "family.beta.example:8853"},
+                    },
+                },
+            }
+        )
+        return {"listing": listing, "01-alpha.json": alpha, "02-beta.json": beta}
+
+    def test_dns_family_emits_udp_and_tcp_with_metadata(self, monkeypatch) -> None:
+        self._patch_fetch(monkeypatch, self._bodies())
+        candidates = PaulMillrDnsSource(SourceEntry(type="paulmillr")).candidates()
+        assert sorted((c.host, c.transport) for c in candidates) == [
+            ("192.0.2.1", "dns-tcp"),
+            ("192.0.2.1", "dns-udp"),
+            ("198.51.100.1", "dns-tcp"),
+            ("198.51.100.1", "dns-udp"),
+            ("2001:db8::1", "dns-tcp"),
+            ("2001:db8::1", "dns-udp"),
+        ]
+        alpha = next(c for c in candidates if c.host == "192.0.2.1")
+        assert alpha.provider == "Alpha DNS"
+        assert alpha.metadata["region"] == "EU"
+        assert alpha.metadata["censorship"] == "true"
+
+    def test_doh_family_emits_endpoints_with_bootstrap(self, monkeypatch) -> None:
+        self._patch_fetch(monkeypatch, self._bodies())
+        candidates = PaulMillrDohSource(SourceEntry(type="paulmillr")).candidates()
+        assert [c.endpoint_url for c in candidates] == [
+            "https://doh.alpha.example/dns-query",
+            "https://doh.beta.example/query",
+        ]
+        alpha = candidates[0]
+        assert alpha.provider == "Alpha DNS"
+        assert alpha.bootstrap_ipv4 == ["192.0.2.1"]
+        assert alpha.bootstrap_ipv6 == ["2001:db8::1"]
+
+    def test_dot_family_emits_targets_and_variant_provider(self, monkeypatch) -> None:
+        self._patch_fetch(monkeypatch, self._bodies())
+        candidates = PaulMillrDotSource(SourceEntry(type="paulmillr")).candidates()
+        assert [(c.host, c.port, c.provider) for c in candidates] == [
+            ("dot.alpha.example", 853, "Alpha DNS"),
+            ("family.beta.example", 8853, "Beta DNS: Family"),
+        ]
+        assert candidates[0].tls_server_name == "dot.alpha.example"
+        assert candidates[0].bootstrap_ipv4 == ["192.0.2.1"]
+
+    def test_hidden_and_malformed_profiles_skipped(self, monkeypatch) -> None:
+        bodies = self._bodies()
+        listing = json.dumps(
+            [
+                {
+                    "name": "00-hidden.json",
+                    "download_url": "https://example.com/00-hidden.json",
+                },
+                {
+                    "name": "01-broken.json",
+                    "download_url": "https://example.com/01-broken.json",
+                },
+                {
+                    "name": "02-beta.json",
+                    "download_url": "https://example.com/02-beta.json",
+                },
+            ]
+        )
+        bodies["listing"] = listing
+        bodies["00-hidden.json"] = json.dumps({"hidden": True})
+        bodies["01-broken.json"] = "{not json"
+        self._patch_fetch(monkeypatch, bodies)
+        candidates = PaulMillrDohSource(SourceEntry(type="paulmillr")).candidates()
+        assert [c.endpoint_url for c in candidates] == ["https://doh.beta.example/query"]
+
+    def test_listing_fetch_failure_returns_empty(self, monkeypatch) -> None:
+        def fake_urlopen(url: str, timeout: int = 30) -> _FakeResponse:
+            raise OSError("boom")
+
+        monkeypatch.setattr(urllib.request, "urlopen", fake_urlopen)
+        assert PaulMillrDohSource(SourceEntry(type="paulmillr")).candidates() == []
+
+
+class TestDibDotSources:
+    BASE = DIBDOT_BASE_URL
+
+    def _patch_fetch(self, monkeypatch, bodies: dict[str, str]) -> None:
+        def fake_urlopen(url: str, timeout: int = 30) -> _FakeResponse:
+            for name, body in bodies.items():
+                if url == f"{self.BASE}/{name}":
+                    return _FakeResponse(body)
+            raise OSError(f"unexpected url {url}")
+
+        monkeypatch.setattr(urllib.request, "urlopen", fake_urlopen)
+
+    def test_doh_from_domains_and_ip_comments(self, monkeypatch) -> None:
+        self._patch_fetch(
+            monkeypatch,
+            {
+                "doh-domains.txt": "doh.example.com\n# a comment\nnot a domain ok\n\n",
+                "doh-ipv4.txt": "192.0.2.10   # doh.example.com, extra.example.com\n",
+                "doh-ipv6.txt": "2001:db8::10 # v6.example.com\n",
+            },
+        )
+        candidates = DibDotDohSource(SourceEntry(type="dibdot")).candidates()
+        assert [c.host for c in candidates] == [
+            "doh.example.com",
+            "extra.example.com",
+            "v6.example.com",
+        ]
+        assert all(
+            c.endpoint_url == f"https://{c.host}/dns-query" and c.port == 443 for c in candidates
+        )
+        extra = next(c for c in candidates if c.host == "extra.example.com")
+        assert extra.bootstrap_ipv4 == ["192.0.2.10"]
+
+    def test_dot_groups_ips_per_hostname(self, monkeypatch) -> None:
+        self._patch_fetch(
+            monkeypatch,
+            {
+                "doh-ipv4.txt": (
+                    "192.0.2.10 # shared.example.com\n"
+                    "192.0.2.11 # shared.example.com, solo.example.com\n"
+                ),
+                "doh-ipv6.txt": "2001:db8::99 # shared.example.com\n",
+            },
+        )
+        candidates = DibDotDotSource(SourceEntry(type="dibdot")).candidates()
+        assert [(c.host, c.port) for c in candidates] == [
+            ("shared.example.com", 853),
+            ("solo.example.com", 853),
+        ]
+        shared = candidates[0]
+        assert shared.bootstrap_ipv4 == ["192.0.2.10", "192.0.2.11"]
+        assert shared.bootstrap_ipv6 == ["2001:db8::99"]
+        assert shared.tls_server_name == "shared.example.com"
+
+    def test_partial_fetch_failure_uses_remaining_files(self, monkeypatch) -> None:
+        self._patch_fetch(
+            monkeypatch,
+            {"doh-ipv4.txt": "192.0.2.10 # kept.example.com\n"},
+        )
+        candidates = DibDotDotSource(SourceEntry(type="dibdot")).candidates()
+        assert [c.host for c in candidates] == ["kept.example.com"]
+
+    def test_garbage_rows_ignored(self, monkeypatch) -> None:
+        self._patch_fetch(
+            monkeypatch,
+            {
+                "doh-ipv4.txt": ("not-an-ip # x.example.com\n192.0.2.10\n# comment only\n"),
+                "doh-ipv6.txt": "",
+            },
+        )
+        assert DibDotDotSource(SourceEntry(type="dibdot")).candidates() == []
+
+
+def test_dnscrypt_label_overrides_source_name(monkeypatch) -> None:
+    seen: list[str] = []
+    sibling_url = "https://example.com/parental-control.md"
+
+    def fake_urlopen(url: str, timeout: int = 30) -> _FakeResponse:
+        seen.append(url)
+        return _FakeResponse(f"## p\n\n{_doh_stamp(b'1.2.3.4', b'fam.example.com')}\n")
+
+    monkeypatch.setattr(urllib.request, "urlopen", fake_urlopen)
+    entry = SourceEntry(type="dnscrypt", url=sibling_url, extra={"label": "dnscrypt-parental"})
+    candidates = DnsCryptDohSource(entry).candidates()
+    assert seen == [sibling_url]
+    assert [c.source for c in candidates] == ["dnscrypt-parental"]
