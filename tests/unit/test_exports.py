@@ -66,6 +66,32 @@ def _doh_result(
     )
 
 
+def _dot_result(
+    host: str = "dns.example.com",
+    port: int = 853,
+    tls_server_name: str | None = "dns.example.com",
+    accepted: bool = True,
+) -> ValidationResult:
+    c = Candidate(
+        provider="ExampleDoT",
+        source="test",
+        transport="dot",
+        endpoint_url=None,
+        host=host,
+        port=port,
+        path=None,
+        tls_server_name=tls_server_name,
+    )
+    return ValidationResult(
+        candidate=c,
+        accepted=accepted,
+        score=92,
+        status="accepted" if accepted else "rejected",
+        reasons=[],
+        probes=[ProbeResult(ok=True, probe="dot:positive:test", latency_ms=15.0)],
+    )
+
+
 class TestJsonExport:
     def test_accepted_only_default(self) -> None:
         results = [_dns_result(accepted=True), _dns_result("192.0.2.2", accepted=False)]
@@ -248,6 +274,25 @@ class TestTextExport:
         lines = export_text(results).strip().splitlines()
         assert len(lines) == 1
 
+    def test_dot_endpoints_rendered_as_tls_urls(self) -> None:
+        text = export_text([_dot_result()], transport="dot")
+        assert "tls://dns.example.com" in text
+
+    def test_dot_ip_endpoint_with_tls_name(self) -> None:
+        text = export_text(
+            [_dot_result(host="1.1.1.1", tls_server_name="one.one.one.one")],
+            transport="dot",
+        )
+        assert "tls://1.1.1.1#one.one.one.one" in text
+
+    def test_dot_non_default_port_included(self) -> None:
+        text = export_text([_dot_result(port=8853)], transport="dot")
+        assert "tls://dns.example.com:8853" in text
+
+    def test_dot_excluded_from_dns_and_doh_exports(self) -> None:
+        assert "dot.example" not in export_text([_dot_result(host="dot.example.com")])
+        assert "tls://" not in export_text([_dot_result()], transport="doh")
+
 
 class TestDnsdistExport:
     def test_dns_backend_present(self) -> None:
@@ -280,6 +325,13 @@ class TestDnsdistExport:
         text = export_dnsdist([_dns_result(), _doh_result()])
         assert text.count("newServer") == 2
 
+    def test_dot_backend_has_tls_without_doh_path(self) -> None:
+        text = export_dnsdist([_dot_result()])
+        assert "-- DoT backends" in text
+        assert 'tls="openssl"' in text
+        assert 'subjectName="dns.example.com"' in text
+        assert "dohPath" not in text
+
 
 class TestUnboundExport:
     def test_forward_zone_present(self) -> None:
@@ -304,3 +356,29 @@ class TestUnboundExport:
     def test_rejected_excluded(self) -> None:
         text = export_unbound([_dns_result(accepted=False)])
         assert "192.0.2.1" not in text
+
+    def test_tls_mode_emits_forward_tls_upstream(self) -> None:
+        text = export_unbound([_dot_result()], use_tls=True)
+        assert "forward-tls-upstream: yes" in text
+
+    def test_tls_mode_hostname_uses_forward_host(self) -> None:
+        text = export_unbound([_dot_result()], use_tls=True)
+        assert "forward-host: dns.example.com#dns.example.com" in text
+        assert "forward-addr:" not in text
+
+    def test_tls_mode_ip_uses_forward_addr_with_tls_name(self) -> None:
+        text = export_unbound(
+            [_dot_result(host="9.9.9.9", tls_server_name="dns.quad9.net")],
+            use_tls=True,
+        )
+        assert "forward-addr: 9.9.9.9@853#dns.quad9.net" in text
+
+    def test_tls_mode_excludes_plain_dns(self) -> None:
+        text = export_unbound([_dns_result(), _dot_result()], use_tls=True)
+        assert "192.0.2.1" not in text
+        assert "forward-host:" in text
+
+    def test_plain_mode_excludes_dot(self) -> None:
+        text = export_unbound([_dot_result()])
+        assert "forward-addr:" not in text
+        assert "forward-tls-upstream" not in text

@@ -1,13 +1,14 @@
-# Public DNS and DoH resolver crawler
+# Public DNS, DoT, and DoH resolver crawler
 
-Aggregate, validate, score, and export public DNS and DoH resolvers.
+Aggregate, validate, score, and export public DNS, DoT, and DoH resolvers.
 
 ## Features
 
-- **Multi-source discovery** - plain DNS from public-dns.info, DoH from curl wiki and AdGuard provider lists, manual seed files
+- **Multi-source discovery** - plain DNS from public-dns.info, DoH from curl wiki and AdGuard provider lists, DoT from the AdGuard provider list, manual seed files
 - **Pre-validation filtering records** - source and normalization drops are exported as `filtered.json` with reason codes
-- **Full endpoint metadata** - DoH records preserve URL, host, port, path, TLS server name, bootstrap IPs, and provenance
+- **Full endpoint metadata** - DoH records preserve URL, host, port, path, TLS server name, bootstrap IPs, and provenance; DoT records preserve host, port, TLS server name, and bootstrap IPs
 - **Active validation** - reachability, NXDOMAIN fidelity, latency, consistency, TLS validity
+- **Capability tags** - non-scoring measurements (DNSSEC validation, ECS support, filtering detection) exported as a `capabilities` object per result
 - **Pluggable test corpus** - controlled zone, local external JSON corpus, or tiny built-in fallback
 - **Scored output** - component-based scoring (correctness, availability, performance, history) with separate confidence score, score caps, and derived metrics
 - **Multiple export formats** - JSON, plain text, dnsdist config, Unbound forward-zone
@@ -20,9 +21,11 @@ Default discovery sources configured in `configs/default.toml`:
   - default filter: `min_reliability = 0.50`
 - `curl_wiki` (DoH): <https://raw.githubusercontent.com/wiki/curl/curl/DNS-over-HTTPS.md>
 - `adguard` (DoH): <https://raw.githubusercontent.com/AdguardTeam/KnowledgeBaseDNS/master/docs/general/dns-providers.md>
+- `adguard` (DoT): same AdGuard providers markdown, `tls://` rows
 - `manual` seeds (local files):
   - `configs/manual-dns.txt`
   - `configs/manual-doh.toml`
+  - `configs/manual-dot.toml`
 
 ## Quick start
 
@@ -87,8 +90,10 @@ For multi-VM flows (for example GitHub Actions matrix validation), use:
 - `filtered.json` - candidates dropped before validation, including source filtering, normalization failures, duplicates, and historical quarantine
 - `resolvers.txt` - accepted plain DNS resolvers only, as `host:port`
 - `resolvers-doh.txt` - accepted DoH resolvers only, as full HTTPS endpoints
-- `dnsdist.conf` - dnsdist backends for all non-rejected resolvers
+- `resolvers-dot.txt` - accepted DoT resolvers only, as `tls://host[:port][#tls-name]`
+- `dnsdist.conf` - dnsdist backends for all non-rejected resolvers (plain DNS, DoT, and DoH sections)
 - `unbound-forward.conf` - accepted plain DNS resolvers rendered as Unbound forward zones
+- `unbound-forward-dot.conf` - accepted DoT resolvers rendered as an Unbound TLS forward zone (`forward-tls-upstream: yes`)
 
 If `--split-json-max-bytes` is used, large JSON outputs are written as `name.part-XXXX.json` chunks instead of a single large file.
 
@@ -129,17 +134,36 @@ type = "adguard"               # fetch AdGuard providers markdown list
 type = "manual"
 path = "configs/manual-doh.toml"
 
+[[sources.dot]]
+type = "adguard"               # parse tls:// rows from the same AdGuard list
+
+[[sources.dot]]
+type = "manual"
+path = "configs/manual-dot.toml"
+
 [validation]
 rounds = 3
 timeout_ms = 2000
 parallelism = 50
+doh_parallelism = 20
+dot_parallelism = 15
 require_tcp_for_dns = false            # when true, accepted dns-udp results require
                                        # an accepted dns-tcp result on the same host:port
 require_tls_valid_for_doh = true       # when false, DoH TLS failures are penalties
                                        # only instead of hard failures
+require_tls_valid_for_dot = true       # same, for DoT
 revalidation_stable_days = 0           # >0: resolvers with this many consecutive
                                        # accepted days get reduced probe rounds
 revalidation_stable_rounds = 1         # rounds used for stable resolvers
+
+# Non-scoring capability tags measured per resolver endpoint. Each check
+# produces true/false/null in the result's `capabilities` object and never
+# affects the score.
+[validation.capabilities]
+enabled = true
+dnssec_sentinels = ["dnssec-failed.org.", "sigfail.verteiltesysteme.net."]
+ecs_probe_qname = "www.google.com."
+filter_domains = ["doubleclick.net.", "ads.yahoo.com.", "pornhub.com."]
 
 [validation.dns_backend]
 kind = "python"                       # default backend; "massdns" is optional
@@ -187,6 +211,7 @@ MassDNS phase-1 routing limitations:
 - Only `dns-udp` probes on port `53` are routed to MassDNS.
 - `dns-tcp` and non-53 plain DNS probes automatically use the python backend.
 - `doh` probes always use the existing DoH path.
+- `dot` probes always use the DoT path (`dns.asyncquery.tls`); MassDNS cannot do TLS.
 - `latency_ms` on MassDNS can have lower fidelity depending on output fields.
 
 Install MassDNS before enabling it:
@@ -270,6 +295,7 @@ flowchart TD
     P --> Q{candidate transport}
     Q -->|dns-udp or dns-tcp| R[validate_dns_candidate]
     Q -->|doh| S[validate_doh_candidate]
+    Q -->|dot| D[validate_dot_candidate]
 
     R --> R1[run positive probes]
     R1 --> R2{expected_mode}
@@ -289,21 +315,34 @@ flowchart TD
     S4 --> T
     S5 --> T
 
+    D --> D1[run positive probes]
+    D1 --> D2{expected_mode}
+    D2 -->|exact_rrset| D3[TLS handshake with SNI and cert validation<br/>query candidate over DoT<br/>normalize RRset<br/>compare with expected_answers]
+    D2 -->|consensus_match| D4[query candidate over DoT<br/>query trusted baselines<br/>compare unordered normalized answers]
+    D2 -->|nxdomain| D5[expand qname_template at runtime<br/>query candidate over DoT<br/>require negative response without synthetic answers]
+    D3 --> T
+    D4 --> T
+    D5 --> T
+
     T --> U[export outputs]
 ```
 
-`validate_dns_candidate` and `validate_doh_candidate` both consume the same prebuilt corpus,
-but they execute transport-specific query code. `exact_rrset` probes compare directly against
-pinned answers, `consensus_match` probes compare the candidate against the configured trusted
-baseline resolvers, and `negative_generated` probes keep the template in the corpus and expand a
-fresh query name at execution time.
+`validate_dns_candidate`, `validate_doh_candidate`, and `validate_dot_candidate` all consume
+the same prebuilt corpus, but they execute transport-specific query code. `exact_rrset` probes
+compare directly against pinned answers, `consensus_match` probes compare the candidate against
+the configured trusted baseline resolvers, and `negative_generated` probes keep the template in
+the corpus and expand a fresh query name at execution time. DoT candidates may use IP literals
+or hostnames; hostname endpoints resolve once per validation window (or use configured
+`bootstrap_ipv4`/`bootstrap_ipv6` addresses) and validate the certificate against
+`tls_server_name` (defaulting to the host).
 
 ### Validation reason codes
 
 | Code | Meaning |
 |---|---|
 | `nxdomain_spoofing` | Resolver returned NOERROR for a nonexistent name |
-| `tls_name_mismatch` | DoH TLS certificate does not match the expected server name |
+| `tls_name_mismatch` | DoH/DoT TLS certificate does not match the expected server name |
+| `tls_error` | DoH/DoT TLS handshake or certificate validation failed |
 | `timeout_rate_high` | More than 50% of probes timed out |
 | `latency_p95_high` | 95th-percentile latency exceeds 2 s |
 | `unexpected_nxdomain` | Resolver returned NXDOMAIN for a name that should exist |
@@ -410,9 +449,17 @@ JSON exports include these new fields:
     "flaps_30d": 0,
     "consecutive_success_days": 5,
     "consecutive_fail_days": 0
+  },
+  "capabilities": {
+    "dnssec_validating": true,
+    "ecs_support": false,
+    "filters_detected": null
   }
 }
 ```
+
+`capabilities` values are `true`, `false`, or `null` (inconclusive). They are
+measured by the `[validation.capabilities]` checks and never affect the score.
 
 ## Development
 
@@ -499,7 +546,8 @@ These helper scripts are used by the parent data repo workflow and are intention
 
 - `scripts/apply_history_quarantine.py` - drops currently quarantined plain DNS hosts from discovered candidates and appends `historical_dns_quarantine` entries to `filtered.json`
 - `scripts/update_history.py` - updates `meta/history.duckdb` from `validated.json`, `filtered.json`, and build metadata
-- `scripts/generate_stats_report.py` - regenerates the `<!-- GENERATED_STATS_* -->` README statistics section from history data
+- `scripts/generate_changelog.py` - diffs the two most recent runs in `meta/history.duckdb` and writes `meta/changelog.json` (added, removed, and status-transition records)
+- `scripts/generate_stats_report.py` - regenerates the `<!-- GENERATED_STATS_* -->` README statistics section from history data, including the latest-run changelog summary
 - `scripts/analyze_scores.py` - analyzes score distribution from validation results and can compare before/after runs
 - `scripts/analyze_history.py` - inspects history database and prints diagnostics about resolver history coverage
 
@@ -544,6 +592,7 @@ History is tracked per-endpoint using a canonical `resolver_key`:
 
 - **DNS UDP**: `dns-udp|host|port` (e.g., `dns-udp|1.1.1.1|53`)
 - **DNS TCP**: `dns-tcp|host|port` (e.g., `dns-tcp|1.1.1.1|53`)
+- **DoT**: `dot|host|port` (e.g., `dot|dns.quad9.net|853`)
 - **DoH**: `doh|url` (e.g., `doh|https://dns.example.com/dns-query`)
 
 This allows:

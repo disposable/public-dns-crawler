@@ -14,6 +14,7 @@ from resolver_inventory.history import (
 )
 from resolver_inventory.models import Candidate, ProbeResult, ValidationResult
 from resolver_inventory.settings import Settings
+from resolver_inventory.validate.capabilities import parse_capability_probes
 
 if TYPE_CHECKING:
     import duckdb
@@ -613,6 +614,11 @@ def score(
     reasons: list[str] = []
     components = ScoreComponents()
 
+    # Capability probes carry measured properties, not pass/fail signals.
+    # Extract them up front so they never affect scoring math.
+    capabilities = parse_capability_probes(probes)
+    probes = [p for p in probes if not p.probe.startswith("capability:")]
+
     # Get historical metrics if a history database was provided
     history_consulted = history_connection is not None and run_date is not None
     metrics: ResolverStabilityMetrics | None = None
@@ -663,10 +669,12 @@ def score(
             reasons=reasons,
         )
 
-    # Honor require_tls_valid_for_doh: when false, TLS-validity failures keep
-    # their correctness penalty but do not hard-fail the DoH candidate.
+    # Honor require_tls_valid_for_doh/dot: when false, TLS-validity failures
+    # keep their correctness penalty but do not hard-fail the candidate.
     hard_fail_reasons = _HARD_FAIL_REASONS
     if candidate.transport == "doh" and not settings.validation.require_tls_valid_for_doh:
+        hard_fail_reasons = _HARD_FAIL_REASONS - _TLS_VALIDITY_REASONS
+    elif candidate.transport == "dot" and not settings.validation.require_tls_valid_for_dot:
         hard_fail_reasons = _HARD_FAIL_REASONS - _TLS_VALIDITY_REASONS
     has_hard_fail = _has_hard_fail(reasons, hard_fail_reasons)
     if has_hard_fail and final_score > 59:
@@ -710,4 +718,5 @@ def score(
         },
         score_caps_applied=components.caps_applied,
         derived_metrics=components.derived_metrics,
+        capabilities=capabilities,
     )

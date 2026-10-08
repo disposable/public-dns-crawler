@@ -1,12 +1,13 @@
 """Unbound forward-zone config exporter.
 
-Only emits classic DNS forwarders that passed plain DNS validation.
-Unbound is not health-aware in the same way dnsdist is; this exporter
-is intentionally conservative.
+Only emits classic DNS forwarders that passed plain DNS validation, or
+DoT forwarders when ``use_tls`` is set. Unbound is not health-aware in the
+same way dnsdist is; this exporter is intentionally conservative.
 """
 
 from __future__ import annotations
 
+import ipaddress
 from pathlib import Path
 
 from resolver_inventory.models import ValidationResult
@@ -17,36 +18,65 @@ _HEADER = """\
 """
 
 
+def _is_ip(host: str) -> bool:
+    try:
+        ipaddress.ip_address(host)
+        return True
+    except ValueError:
+        return False
+
+
 def export_unbound(
     results: list[ValidationResult],
     *,
     accepted_only: bool = True,
     forward_zone: str = ".",
     path: str | Path | None = None,
+    use_tls: bool = False,
 ) -> str:
     """Render an Unbound forward-zone configuration snippet.
 
-    Only includes plain DNS (UDP/TCP) accepted resolvers.
+    With ``use_tls=False`` only plain DNS (UDP/TCP) accepted resolvers are
+    included. With ``use_tls=True`` only accepted DoT resolvers are emitted
+    as ``forward-addr: host@853#tlsname`` / ``forward-host: name#name``
+    entries under ``forward-tls-upstream: yes``.
     Returns the config text. If *path* is given, also writes it to disk.
     """
     records = [r for r in results if r.accepted] if accepted_only else results
 
-    seen_hosts: set[str] = set()
-    forward_addrs: list[str] = []
+    seen: set[str] = set()
+    forward_lines: list[str] = []
     for r in records:
         c = r.candidate
-        if c.transport not in ("dns-udp", "dns-tcp"):
+        if not use_tls:
+            if c.transport not in ("dns-udp", "dns-tcp"):
+                continue
+            host_key = c.host
+            if host_key in seen:
+                continue
+            seen.add(host_key)
+            addr = f"{c.host}@{c.port}" if c.port != 53 else c.host
+            forward_lines.append(f"    forward-addr: {addr}")
             continue
-        host_key = c.host
-        if host_key in seen_hosts:
+
+        if c.transport != "dot":
             continue
-        seen_hosts.add(host_key)
-        addr = f"{c.host}@{c.port}" if c.port != 53 else c.host
-        forward_addrs.append(f"    forward-addr: {addr}")
+        tls_name = c.tls_server_name or ""
+        key = f"{c.host}|{tls_name}"
+        if key in seen:
+            continue
+        seen.add(key)
+        name_suffix = f"#{tls_name}" if tls_name else ""
+        if _is_ip(c.host):
+            forward_lines.append(f"    forward-addr: {c.host}@{c.port}{name_suffix}")
+        else:
+            forward_lines.append(f"    forward-host: {c.host}{name_suffix}")
 
     lines = [_HEADER, "forward-zone:"]
     lines.append(f'    name: "{forward_zone}"')
-    lines.extend(forward_addrs)
+    if use_tls:
+        lines.append("    forward-tls-upstream: yes")
+    lines.extend(forward_lines)
     lines.append("")
 
     text = "\n".join(lines)

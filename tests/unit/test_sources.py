@@ -9,6 +9,7 @@ from resolver_inventory.sources.adguard import PROVIDERS_URL as ADGUARD_URL
 from resolver_inventory.sources.adguard import AdGuardSource
 from resolver_inventory.sources.curl_wiki import PROVIDERS_URL as CURL_URL
 from resolver_inventory.sources.curl_wiki import CurlWikiSource
+from resolver_inventory.sources.dot import AdGuardDotSource, ManualDotSource
 from resolver_inventory.sources.publicdns_info import (
     DEFAULT_URL as PUBLICDNS_INFO_URL,
 )
@@ -123,6 +124,99 @@ class TestAdGuardSource:
             ("AdGuard DNS", "https://dns.adguard-dns.com/dns-query"),
             ("AdGuard DNS", "https://family.adguard-dns.com/dns-query"),
         ]
+
+
+class TestAdGuardDotSource:
+    def test_extracts_dot_rows_with_provider_headings(self, monkeypatch) -> None:
+        seen: list[str] = []
+        body = """
+### AdGuard DNS
+
+#### Default
+
+| Protocol       | Address                                     |                |
+|----------------|---------------------------------------------|----------------|
+| DNS-over-HTTPS | `https://dns.adguard-dns.com/dns-query`     | |
+| DNS-over-TLS   | `tls://dns.adguard-dns.com`                 | |
+| DNS-over-TLS   | `tls://dns.adguard-dns.com`                 | |
+
+### Other Provider
+
+| DNS-over-TLS | `tls://dot.other.example:8853` | |
+"""
+
+        def fake_urlopen(url: str, timeout: int = 30) -> _FakeResponse:
+            seen.append(url)
+            return _FakeResponse(body)
+
+        monkeypatch.setattr(urllib.request, "urlopen", fake_urlopen)
+
+        candidates = AdGuardDotSource(SourceEntry(type="adguard")).candidates()
+
+        assert seen == [ADGUARD_URL]
+        assert [(c.provider, c.host, c.port, c.tls_server_name) for c in candidates] == [
+            ("AdGuard DNS", "dns.adguard-dns.com", 853, "dns.adguard-dns.com"),
+            ("Other Provider", "dot.other.example", 8853, "dot.other.example"),
+        ]
+        assert all(c.transport == "dot" for c in candidates)
+
+    def test_fetch_failure_returns_empty(self, monkeypatch) -> None:
+        def fake_urlopen(url: str, timeout: int = 30) -> _FakeResponse:
+            raise OSError("Network is unreachable")
+
+        monkeypatch.setattr(urllib.request, "urlopen", fake_urlopen)
+
+        candidates = AdGuardDotSource(SourceEntry(type="adguard")).candidates()
+        assert candidates == []
+
+
+class TestManualDotSource:
+    def test_parses_endpoints_file(self, tmp_path) -> None:
+        toml_file = tmp_path / "manual-dot.toml"
+        toml_file.write_text(
+            """
+[[endpoints]]
+host = "dns.example.com"
+port = 853
+provider = "Example"
+
+[[endpoints]]
+host = "192.0.2.1"
+provider = "IP endpoint"
+tls_server_name = "dns.example.com"
+bootstrap_ipv4 = ["192.0.2.1"]
+notes = "extra metadata"
+
+[[endpoints]]
+host = ""
+""",
+            encoding="utf-8",
+        )
+        candidates = ManualDotSource(SourceEntry(type="manual", path=str(toml_file))).candidates()
+
+        assert len(candidates) == 2
+        first, second = candidates
+        assert (first.host, first.port, first.provider) == (
+            "dns.example.com",
+            853,
+            "Example",
+        )
+        assert first.tls_server_name == "dns.example.com"
+        assert (second.host, second.tls_server_name) == ("192.0.2.1", "dns.example.com")
+        assert second.bootstrap_ipv4 == ["192.0.2.1"]
+        assert second.metadata == {"notes": "extra metadata"}
+
+    def test_missing_file_returns_empty(self, tmp_path) -> None:
+        candidates = ManualDotSource(
+            SourceEntry(type="manual", path=str(tmp_path / "absent.toml"))
+        ).candidates()
+        assert candidates == []
+
+    def test_default_port(self, tmp_path) -> None:
+        toml_file = tmp_path / "manual-dot.toml"
+        toml_file.write_text('[[endpoints]]\nhost = "dns.example.com"\n', encoding="utf-8")
+        candidates = ManualDotSource(SourceEntry(type="manual", path=str(toml_file))).candidates()
+        assert candidates[0].port == 853
 
 
 class TestPublicDnsInfoSource:

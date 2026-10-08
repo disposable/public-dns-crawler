@@ -16,15 +16,28 @@ type = "adguard"
 type = "manual"
 path = "configs/manual-doh.toml"
 
+[[sources.dot]]
+type = "adguard"
+
+[[sources.dot]]
+type = "manual"
+path = "configs/manual-dot.toml"
+
 [validation]
 rounds = 3
 timeout_ms = 2000
 parallelism = 50
 doh_parallelism = 20
+dot_parallelism = 15
 require_tcp_for_dns = false
 require_tls_valid_for_doh = true
+require_tls_valid_for_dot = true
 revalidation_stable_days = 7
 revalidation_stable_rounds = 1
+
+# Non-scoring capability tags measured per resolver endpoint.
+[validation.capabilities]
+enabled = true
 
 [validation.dns_backend]
 kind = "python"

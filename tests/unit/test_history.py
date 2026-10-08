@@ -1088,3 +1088,147 @@ class TestRevalidationRounds:
             for child in prepared.temp_dir.iterdir():
                 child.unlink()
             prepared.temp_dir.rmdir()
+
+
+def _dot_result(host: str, status: str, port: int = 853) -> ValidationResult:
+    return ValidationResult(
+        candidate=Candidate(
+            provider=None,
+            source="test",
+            transport="dot",
+            endpoint_url=None,
+            host=host,
+            port=port,
+            path=None,
+            tls_server_name=host,
+        ),
+        accepted=status == "accepted",
+        score=90 if status == "accepted" else 10,
+        status=status,  # type: ignore[arg-type]
+        reasons=[],
+        probes=[ProbeResult(ok=status == "accepted", probe="probe", error=None)],
+    )
+
+
+class TestChangelog:
+    def test_none_with_fewer_than_two_runs(self, tmp_path) -> None:
+        db_path = tmp_path / "history.duckdb"
+        with connect_history_db(db_path) as connection:
+            update_history(
+                connection,
+                _metadata(date(2026, 1, 1)),
+                [_dns_result("1.1.1.1", "dns-udp", "accepted")],
+                [],
+            )
+            from resolver_inventory.history import compute_changelog
+
+            assert compute_changelog(connection) is None
+
+    def test_diffs_two_runs(self, tmp_path) -> None:
+        db_path = tmp_path / "history.duckdb"
+        with connect_history_db(db_path) as connection:
+            update_history(
+                connection,
+                _metadata(date(2026, 1, 1)),
+                [
+                    _dns_result("1.1.1.1", "dns-udp", "accepted"),
+                    _dns_result("8.8.8.8", "dns-udp", "accepted"),
+                    _dot_result("dns.quad9.net", "accepted"),
+                ],
+                [],
+            )
+            update_history(
+                connection,
+                _metadata(date(2026, 1, 2)),
+                [
+                    _dns_result("1.1.1.1", "dns-udp", "accepted"),
+                    _dns_result("8.8.8.8", "dns-udp", "rejected", ["timeout"]),
+                    _dns_result("9.9.9.9", "dns-udp", "accepted"),
+                ],
+                [],
+            )
+            from resolver_inventory.history import compute_changelog
+
+            changelog = compute_changelog(connection)
+
+        assert changelog is not None
+        assert changelog["run_date"] == "2026-01-02"
+        assert changelog["previous_run_date"] == "2026-01-01"
+        assert changelog["added_count"] == 1
+        assert changelog["added"] == ["dns-udp|9.9.9.9|53"]
+        assert changelog["removed_count"] == 1
+        assert changelog["removed"] == ["dot|dns.quad9.net|853"]
+        assert changelog["transition_counts"] == {"accepted->rejected": 1}
+        assert changelog["status_changes_total"] == 1
+        assert changelog["status_changes"] == [
+            {"resolver": "dns-udp|8.8.8.8|53", "from": "accepted", "to": "rejected"}
+        ]
+
+    def test_no_changes_between_runs(self, tmp_path) -> None:
+        db_path = tmp_path / "history.duckdb"
+        with connect_history_db(db_path) as connection:
+            results = [_dns_result("1.1.1.1", "dns-udp", "accepted")]
+            update_history(connection, _metadata(date(2026, 1, 1)), results, [])
+            update_history(connection, _metadata(date(2026, 1, 2)), results, [])
+            from resolver_inventory.history import compute_changelog
+
+            changelog = compute_changelog(connection)
+
+        assert changelog is not None
+        assert changelog["added_count"] == 0
+        assert changelog["removed_count"] == 0
+        assert changelog["status_changes_total"] == 0
+        assert changelog["transition_counts"] == {}
+
+    def test_truncation_caps_added_list(self, tmp_path) -> None:
+        db_path = tmp_path / "history.duckdb"
+        with connect_history_db(db_path) as connection:
+            update_history(connection, _metadata(date(2026, 1, 1)), [], [])
+            update_history(
+                connection,
+                _metadata(date(2026, 1, 2)),
+                [_dns_result(f"10.0.0.{i}", "dns-udp", "accepted") for i in range(1, 8)],
+                [],
+            )
+            from resolver_inventory.history import compute_changelog
+
+            changelog = compute_changelog(connection, max_entries=3)
+
+        assert changelog is not None
+        assert changelog["added_count"] == 7
+        assert len(changelog["added"]) == 3
+        assert changelog["truncated"] is True
+
+    def test_readme_section_renders_changelog(self) -> None:
+        section = render_stats_section(
+            {
+                "latest_run_date": "2026-01-02",
+                "latest_run_id": "run-2",
+                "runs_tracked": 2,
+                "accepted_count": 10,
+                "candidate_count": 2,
+                "rejected_count": 5,
+                "filtered_count": 1,
+                "accepted_delta": 4,
+                "rejected_delta": -1,
+                "quarantined_count": 0,
+                "top_reasons": [],
+            },
+            {
+                "run_id": "run-2",
+                "run_date": "2026-01-02",
+                "previous_run_id": "run-1",
+                "previous_run_date": "2026-01-01",
+                "added_count": 3,
+                "added": ["dns-udp|9.9.9.9|53"],
+                "removed_count": 1,
+                "removed": ["dot|dns.quad9.net|853"],
+                "transition_counts": {"accepted->rejected": 2},
+                "status_changes": [],
+                "status_changes_total": 2,
+                "truncated": False,
+            },
+        )
+        assert "Latest Run Changes" in section
+        assert "+3" in section and "-1" in section
+        assert "accepted->rejected" in section

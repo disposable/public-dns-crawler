@@ -7,11 +7,22 @@ from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
 from typing import Any, Literal, Protocol
 
-from resolver_inventory.models import ProbeResult
-from resolver_inventory.validate.corpus import CorpusEntry
-from resolver_inventory.validate.dns_plain import _probe_nxdomain, _probe_positive
+import dns.edns
+import dns.message
+import dns.rdatatype
 
-PlainDnsProbeKind = Literal["positive", "nxdomain"]
+from resolver_inventory.models import ProbeResult
+from resolver_inventory.settings import CapabilitiesConfig
+from resolver_inventory.validate.capabilities import run_capability_check
+from resolver_inventory.validate.corpus import CorpusEntry
+from resolver_inventory.validate.dns_plain import (
+    _probe_nxdomain,
+    _probe_positive,
+    _query_tcp,
+    _query_udp,
+)
+
+PlainDnsProbeKind = Literal["positive", "nxdomain", "capability"]
 
 
 @dataclass(frozen=True, slots=True)
@@ -29,6 +40,7 @@ class PlainDnsProbeSpec:
     expected_answers: list[str]
     baseline_key: tuple[str, str] | None
     entry: CorpusEntry
+    capability_name: str = ""
 
 
 @dataclass(frozen=True, slots=True)
@@ -53,7 +65,9 @@ PlainDnsExecutionCallback = Callable[[PlainDnsProbeExecution], Awaitable[None]]
 
 
 def supports_massdns_phase1(spec: PlainDnsProbeSpec) -> bool:
-    return spec.candidate_transport == "dns-udp" and spec.port == 53
+    # Capability specs always run through the python backend: they need
+    # per-check evaluation (and EDNS options) that massdns cannot express.
+    return spec.kind != "capability" and spec.candidate_transport == "dns-udp" and spec.port == 53
 
 
 def plain_dns_probe_spec_to_dict(spec: PlainDnsProbeSpec) -> dict[str, Any]:
@@ -70,6 +84,7 @@ def plain_dns_probe_spec_to_dict(spec: PlainDnsProbeSpec) -> dict[str, Any]:
         "is_nxdomain_probe": spec.is_nxdomain_probe,
         "expected_answers": spec.expected_answers,
         "baseline_key": list(spec.baseline_key) if spec.baseline_key is not None else None,
+        "capability_name": spec.capability_name,
         "entry": {
             "rdtype": spec.entry.rdtype,
             "qname": spec.entry.qname,
@@ -120,6 +135,53 @@ def plain_dns_probe_spec_from_dict(data: dict[str, Any]) -> PlainDnsProbeSpec:
         expected_answers=list(data.get("expected_answers", [])),
         baseline_key=None if baseline_key is None else (baseline_key[0], baseline_key[1]),
         entry=entry,
+        capability_name=data.get("capability_name", ""),
+    )
+
+
+async def _probe_capability(
+    spec: PlainDnsProbeSpec,
+    timeout_s: float,
+    baseline_resolvers: list[str],
+    baseline_cache: dict[tuple[str, str], list[str]],
+    capabilities_config: CapabilitiesConfig,
+) -> ProbeResult:
+    from resolver_inventory.validate.base import resolve_baseline_answers
+
+    async def _send(
+        qname: str,
+        rdtype: str,
+        *,
+        want_dnssec: bool = False,
+        ecs: tuple[str, int] | None = None,
+    ) -> dns.message.Message:
+        options: list[dns.edns.Option] | None = None
+        if ecs is not None:
+            options = [dns.edns.ECSOption(ecs[0], ecs[1])]
+        msg = dns.message.make_query(
+            qname,
+            dns.rdatatype.from_text(rdtype),
+            use_edns=0 if (want_dnssec or ecs is not None) else None,
+            want_dnssec=want_dnssec,
+            options=options,
+        )
+        msg.id = 0
+        if spec.candidate_transport == "dns-udp":
+            resp, _ = await _query_udp(spec.host, spec.port, msg, timeout_s)
+        else:
+            resp, _ = await _query_tcp(spec.host, spec.port, msg, timeout_s)
+        return resp
+
+    async def _baseline(qname: str, rdtype: str) -> list[str]:
+        return await resolve_baseline_answers(
+            qname, rdtype, baseline_resolvers, timeout_s, baseline_cache
+        )
+
+    return await run_capability_check(
+        spec.capability_name,
+        _send,
+        capabilities_config,
+        resolve_baseline=_baseline,
     )
 
 
@@ -130,6 +192,7 @@ async def run_python_plain_dns_batch(
     baseline_resolvers: list[str],
     baseline_cache: dict[tuple[str, str], list[str]],
     parallelism: int,
+    capabilities_config: CapabilitiesConfig | None = None,
     on_execution: PlainDnsExecutionCallback | None = None,
 ) -> list[PlainDnsProbeExecution]:
     if not specs:
@@ -149,6 +212,14 @@ async def run_python_plain_dns_batch(
                     timeout_s,
                     baseline_resolvers,
                     baseline_cache,
+                )
+            elif spec.kind == "capability":
+                result = await _probe_capability(
+                    spec,
+                    timeout_s,
+                    baseline_resolvers,
+                    baseline_cache,
+                    capabilities_config or CapabilitiesConfig(),
                 )
             else:
                 result = await _probe_nxdomain(

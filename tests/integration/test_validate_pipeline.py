@@ -41,6 +41,7 @@ def _settings_for_mode(mode: str, *, path: str | None = None) -> Settings:
     settings.validation.corpus.zone = "test.local"
     settings.validation.corpus.path = path
     settings.validation.corpus.schema_version = 1
+    settings.validation.capabilities.enabled = False
     return settings
 
 

@@ -4,13 +4,13 @@ from __future__ import annotations
 
 from pathlib import Path
 
-from resolver_inventory.history import compute_latest_summary
+from resolver_inventory.history import compute_changelog, compute_latest_summary
 
 GENERATED_STATS_START = "<!-- GENERATED_STATS_START -->"
 GENERATED_STATS_END = "<!-- GENERATED_STATS_END -->"
 
 
-def render_stats_section(summary: dict) -> str:
+def render_stats_section(summary: dict, changelog: dict | None = None) -> str:
     latest_run_date = summary["latest_run_date"] or "n/a"
     latest_run_id = summary["latest_run_id"] or "n/a"
     top_reasons = summary["top_reasons"]
@@ -33,9 +33,31 @@ def render_stats_section(summary: dict) -> str:
         ),
         f"- Currently quarantined DNS hosts: `{summary['quarantined_count']}`",
         "",
-        "### Top Rejection Reasons",
-        "",
     ]
+
+    if changelog:
+        transitions = changelog.get("transition_counts") or {}
+        transition_text = (
+            ", ".join(f"{name} `{count}`" for name, count in transitions.items())
+            if transitions
+            else "none"
+        )
+        lines.extend(
+            [
+                "### Latest Run Changes",
+                "",
+                (
+                    f"- Compared to `{changelog['previous_run_date']}`: "
+                    f"`+{changelog['added_count']}` new, "
+                    f"`-{changelog['removed_count']}` removed, "
+                    f"`{changelog['status_changes_total']}` status changes"
+                ),
+                f"- Status transitions: {transition_text}",
+                "",
+            ]
+        )
+
+    lines.extend(["### Top Rejection Reasons", ""])
 
     if top_reasons:
         lines.extend(
@@ -75,7 +97,8 @@ def replace_generated_section(readme_text: str, generated_section: str) -> str:
 def update_readme_report(connection, readme_path: str | Path) -> None:
     readme = Path(readme_path)
     summary = compute_latest_summary(connection)
+    changelog = compute_changelog(connection)
     updated = replace_generated_section(
-        readme.read_text(encoding="utf-8"), render_stats_section(summary)
+        readme.read_text(encoding="utf-8"), render_stats_section(summary, changelog)
     )
     readme.write_text(updated, encoding="utf-8")

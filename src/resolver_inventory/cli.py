@@ -234,6 +234,7 @@ def cmd_discover(args: argparse.Namespace) -> int:
     from resolver_inventory.export.json import export_filtered_json
     from resolver_inventory.normalize.dns import normalize_dns_candidates
     from resolver_inventory.normalize.doh import normalize_doh_candidates
+    from resolver_inventory.normalize.dot import normalize_dot_candidates
     from resolver_inventory.serialization import candidate_to_dict, write_json
     from resolver_inventory.settings import load_settings
     from resolver_inventory.sources import discover_candidates_with_filtered
@@ -243,8 +244,15 @@ def cmd_discover(args: argparse.Namespace) -> int:
     filtered_candidates = list(discovery.filtered)
     dns_c = normalize_dns_candidates(discovery.candidates, filtered=filtered_candidates)
     doh_c = normalize_doh_candidates(discovery.candidates, filtered=filtered_candidates)
-    all_c = dns_c + doh_c
-    logger.info("Discovered %d candidates (%d DNS, %d DoH)", len(all_c), len(dns_c), len(doh_c))
+    dot_c = normalize_dot_candidates(discovery.candidates, filtered=filtered_candidates)
+    all_c = dns_c + doh_c + dot_c
+    logger.info(
+        "Discovered %d candidates (%d DNS, %d DoH, %d DoT)",
+        len(all_c),
+        len(dns_c),
+        len(doh_c),
+        len(dot_c),
+    )
     _github_output("candidates_total", str(len(all_c)))
     _github_output("filtered_total", str(len(filtered_candidates)))
 
@@ -319,6 +327,7 @@ def cmd_validate(args: argparse.Namespace) -> int:
     )
     from resolver_inventory.normalize.dns import normalize_dns_candidates
     from resolver_inventory.normalize.doh import normalize_doh_candidates
+    from resolver_inventory.normalize.dot import normalize_dot_candidates
     from resolver_inventory.serialization import candidate_from_dict, load_json_list
     from resolver_inventory.settings import load_settings
     from resolver_inventory.sources import discover_candidates
@@ -337,8 +346,10 @@ def cmd_validate(args: argparse.Namespace) -> int:
         logger.info("Loaded %d candidates from %s", len(candidates), args.input)
     else:
         raw_candidates = discover_candidates(settings)
-        candidates = normalize_dns_candidates(raw_candidates) + normalize_doh_candidates(
-            raw_candidates
+        candidates = (
+            normalize_dns_candidates(raw_candidates)
+            + normalize_doh_candidates(raw_candidates)
+            + normalize_dot_candidates(raw_candidates)
         )
         candidates.sort(key=lambda candidate: _validation_candidate_sort_key(candidate, settings))
         logger.info("Discovered %d normalized candidates", len(candidates))
@@ -535,17 +546,21 @@ def cmd_materialize_results(args: argparse.Namespace) -> int:
     if "text" in formats:
         resolvers_path = out_dir / "resolvers.txt"
         doh_path = out_dir / "resolvers-doh.txt"
+        dot_path = out_dir / "resolvers-dot.txt"
         export_text(results, path=resolvers_path)
-        export_text(results, include_doh=True, path=doh_path)
-        exported_files.extend([str(resolvers_path), str(doh_path)])
+        export_text(results, transport="doh", path=doh_path)
+        export_text(results, transport="dot", path=dot_path)
+        exported_files.extend([str(resolvers_path), str(doh_path), str(dot_path)])
     if "dnsdist" in formats:
         dnsdist_path = out_dir / "dnsdist.conf"
         export_dnsdist(results, path=dnsdist_path)
         exported_files.append(str(dnsdist_path))
     if "unbound" in formats:
         unbound_path = out_dir / "unbound-forward.conf"
+        unbound_dot_path = out_dir / "unbound-forward-dot.conf"
         export_unbound(results, path=unbound_path)
-        exported_files.append(str(unbound_path))
+        export_unbound(results, path=unbound_dot_path, use_tls=True)
+        exported_files.extend([str(unbound_path), str(unbound_dot_path)])
 
     _github_output("results_accepted", str(accepted_status))
     _github_output("results_candidate", str(candidate_status))
@@ -567,6 +582,7 @@ def cmd_refresh(args: argparse.Namespace) -> int:
     from resolver_inventory.export.unbound import export_unbound
     from resolver_inventory.normalize.dns import normalize_dns_candidates
     from resolver_inventory.normalize.doh import normalize_doh_candidates
+    from resolver_inventory.normalize.dot import normalize_dot_candidates
     from resolver_inventory.settings import load_settings
     from resolver_inventory.sources import discover_candidates_with_filtered
     from resolver_inventory.validate import validate_candidates
@@ -582,12 +598,19 @@ def cmd_refresh(args: argparse.Namespace) -> int:
     _github_group("Discovery")
     discovery = discover_candidates_with_filtered(settings)
     filtered_candidates.extend(discovery.filtered)
-    candidates = normalize_dns_candidates(
-        discovery.candidates,
-        filtered=filtered_candidates,
-    ) + normalize_doh_candidates(
-        discovery.candidates,
-        filtered=filtered_candidates,
+    candidates = (
+        normalize_dns_candidates(
+            discovery.candidates,
+            filtered=filtered_candidates,
+        )
+        + normalize_doh_candidates(
+            discovery.candidates,
+            filtered=filtered_candidates,
+        )
+        + normalize_dot_candidates(
+            discovery.candidates,
+            filtered=filtered_candidates,
+        )
     )
     logger.info("Discovered %d normalized candidates", len(candidates))
     _github_output("candidates_total", str(len(candidates)))
@@ -665,17 +688,21 @@ def cmd_refresh(args: argparse.Namespace) -> int:
     if "text" in formats:
         p1 = out_dir / "resolvers.txt"
         p2 = out_dir / "resolvers-doh.txt"
+        p3 = out_dir / "resolvers-dot.txt"
         export_text(results, path=p1)
-        export_text(results, include_doh=True, path=p2)
-        exported_files.extend([str(p1), str(p2)])
+        export_text(results, transport="doh", path=p2)
+        export_text(results, transport="dot", path=p3)
+        exported_files.extend([str(p1), str(p2), str(p3)])
     if "dnsdist" in formats:
         p = out_dir / "dnsdist.conf"
         export_dnsdist(results, path=p)
         exported_files.append(str(p))
     if "unbound" in formats:
         p = out_dir / "unbound-forward.conf"
+        p_dot = out_dir / "unbound-forward-dot.conf"
         export_unbound(results, path=p)
-        exported_files.append(str(p))
+        export_unbound(results, path=p_dot, use_tls=True)
+        exported_files.extend([str(p), str(p_dot)])
 
     _github_output("output_dir", str(out_dir.resolve()))
     _github_output("exported_files", ",".join(exported_files))
@@ -765,11 +792,11 @@ def cmd_export(args: argparse.Namespace) -> int:
             max_file_bytes=getattr(args, "split_json_max_bytes", None),
         )
     elif fmt == "text":
-        text = export_text(results, path=out)
+        text = export_text(results, path=out, transport=getattr(args, "transport", None))
     elif fmt == "dnsdist":
         text = export_dnsdist(results, path=out)
     elif fmt == "unbound":
-        text = export_unbound(results, path=out)
+        text = export_unbound(results, path=out, use_tls=getattr(args, "tls", False))
     else:
         logger.error("Unknown export format: %s", fmt)
         return 1
@@ -994,6 +1021,17 @@ def _build_parser() -> argparse.ArgumentParser:
     )
     p_export.add_argument("--input", "-i", metavar="FILE", help="Validated results JSON")
     p_export.add_argument("--output", "-o", metavar="FILE", help="Write output here")
+    p_export.add_argument(
+        "--transport",
+        choices=["dns", "dot", "doh"],
+        metavar="T",
+        help="Endpoint family for 'text' exports (default: dns)",
+    )
+    p_export.add_argument(
+        "--tls",
+        action="store_true",
+        help="Render 'unbound' export for DoT forwarders (forward-tls-upstream)",
+    )
     p_export.add_argument(
         "--split-json-max-bytes",
         type=int,

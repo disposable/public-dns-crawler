@@ -91,6 +91,7 @@ def validation_result_to_dict_export(
         "confidence_score": result.confidence_score,
         "score_caps_applied": result.score_caps_applied,
         "derived_metrics": result.derived_metrics,
+        "capabilities": result.capabilities,
     }
 
     if rejected_failed_only and result.status == "rejected":
@@ -131,6 +132,7 @@ def validation_result_from_dict(data: dict[str, Any]) -> ValidationResult:
         score_breakdown=breakdown,
         score_caps_applied=data.get("score_caps_applied", []),
         derived_metrics=data.get("derived_metrics", {}),
+        capabilities=dict(data.get("capabilities", {})),
     )
 
 

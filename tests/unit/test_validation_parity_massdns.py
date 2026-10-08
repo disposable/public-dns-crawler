@@ -32,6 +32,7 @@ def _settings() -> Settings:
     settings.validation.timeout_ms = 1000
     settings.validation.corpus.mode = "controlled"
     settings.validation.corpus.zone = "test.local"
+    settings.validation.capabilities.enabled = False
     return settings
 
 

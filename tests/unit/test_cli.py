@@ -159,6 +159,16 @@ class TestCliParser:
         args = parser.parse_args(["export", "unbound"])
         assert args.format == "unbound"
 
+    def test_export_transport_flag(self) -> None:
+        parser = _build_parser()
+        args = parser.parse_args(["export", "text", "--transport", "dot"])
+        assert args.transport == "dot"
+
+    def test_export_unbound_tls_flag(self) -> None:
+        parser = _build_parser()
+        args = parser.parse_args(["export", "unbound", "--tls"])
+        assert args.tls is True
+
     def test_no_subcommand_exits(self) -> None:
         with pytest.raises(SystemExit):
             main([])

@@ -159,6 +159,7 @@ def _pipeline_settings(backend: str) -> Settings:
     settings.validation.rounds = 1
     settings.validation.corpus.mode = "controlled"
     settings.validation.corpus.zone = "test.local"
+    settings.validation.capabilities.enabled = False
     return settings
 
 

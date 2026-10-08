@@ -11,6 +11,7 @@ from resolver_inventory.models import Candidate, DiscoveryResult
 from resolver_inventory.settings import Settings, SourceEntry
 from resolver_inventory.sources.adguard import AdGuardSource
 from resolver_inventory.sources.curl_wiki import CurlWikiSource
+from resolver_inventory.sources.dot import AdGuardDotSource, ManualDotSource
 from resolver_inventory.sources.manual import ManualDnsSource, ManualDohSource
 from resolver_inventory.sources.publicdns_info import PublicDnsInfoSource
 
@@ -25,9 +26,20 @@ _DOH_SOURCE_MAP = {
     "adguard": AdGuardSource,
 }
 
+_DOT_SOURCE_MAP = {
+    "manual": ManualDotSource,
+    "adguard": AdGuardDotSource,
+}
+
 
 def _build_source(entry: SourceEntry, family: str) -> list[Candidate]:
-    registry = _DNS_SOURCE_MAP if family == "dns" else _DOH_SOURCE_MAP
+    registry = {
+        "dns": _DNS_SOURCE_MAP,
+        "doh": _DOH_SOURCE_MAP,
+        "dot": _DOT_SOURCE_MAP,
+    }.get(family)
+    if registry is None:
+        raise ValueError(f"Unknown source family: {family!r}")
     cls = registry.get(entry.type)
     if cls is None:
         raise ValueError(f"Unknown {family} source type: {entry.type!r}")
@@ -54,6 +66,13 @@ def discover_candidates_with_filtered(settings: Settings) -> DiscoveryResult:
         cls = _DOH_SOURCE_MAP.get(entry.type)
         if cls is None:
             raise ValueError(f"Unknown doh source type: {entry.type!r}")
+        source = cls(entry)
+        results.extend(source.candidates())
+        filtered.extend(source.filtered_candidates())
+    for entry in settings.sources.dot:
+        cls = _DOT_SOURCE_MAP.get(entry.type)
+        if cls is None:
+            raise ValueError(f"Unknown dot source type: {entry.type!r}")
         source = cls(entry)
         results.extend(source.candidates())
         filtered.extend(source.filtered_candidates())

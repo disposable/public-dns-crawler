@@ -60,6 +60,7 @@ def normalize_resolver_key(candidate: Candidate) -> str:
     Format:
     - dns-udp|host|port
     - dns-tcp|host|port
+    - dot|host|port
     - doh|url (canonicalized)
 
     This allows distinguishing:
@@ -1131,3 +1132,80 @@ def get_resolver_stability_metrics(
         flapped_within_day_7d=flapped_within_day_7d,
         flapped_within_day_30d=flapped_within_day_30d,
     )
+
+
+def compute_changelog(connection, *, max_entries: int = 200) -> dict[str, Any] | None:
+    """Diff resolver statuses between the two most recent runs.
+
+    Returns None when fewer than two runs are recorded. The changelog maps
+    resolver_key -> status across ``resolver_run_status`` for the latest and
+    previous run_id (ordered by run_date, then run_started_at).
+    """
+    runs = connection.execute(
+        """
+        SELECT run_id, run_date
+        FROM runs
+        ORDER BY run_date DESC, run_started_at DESC
+        LIMIT 2
+        """
+    ).fetchall()
+    if len(runs) < 2:
+        return None
+
+    latest_run_id, latest_run_date = runs[0]
+    previous_run_id, previous_run_date = runs[1]
+
+    latest = {
+        key: status
+        for key, status in connection.execute(
+            """
+            SELECT resolver_key, status
+            FROM resolver_run_status
+            WHERE run_id = ?
+            """,
+            [latest_run_id],
+        ).fetchall()
+    }
+    previous = {
+        key: status
+        for key, status in connection.execute(
+            """
+            SELECT resolver_key, status
+            FROM resolver_run_status
+            WHERE run_id = ?
+            """,
+            [previous_run_id],
+        ).fetchall()
+    }
+
+    added = sorted(k for k in latest if k not in previous)
+    removed = sorted(k for k in previous if k not in latest)
+
+    transition_counts: dict[str, int] = {}
+    status_changes: list[dict[str, str]] = []
+    for key in sorted(set(latest) & set(previous)):
+        before = previous[key]
+        after = latest[key]
+        if before == after:
+            continue
+        transition = f"{before}->{after}"
+        transition_counts[transition] = transition_counts.get(transition, 0) + 1
+        if len(status_changes) < max_entries:
+            status_changes.append({"resolver": key, "from": before, "to": after})
+
+    return {
+        "run_id": latest_run_id,
+        "run_date": latest_run_date.isoformat() if latest_run_date else None,
+        "previous_run_id": previous_run_id,
+        "previous_run_date": (previous_run_date.isoformat() if previous_run_date else None),
+        "added_count": len(added),
+        "added": added[:max_entries],
+        "removed_count": len(removed),
+        "removed": removed[:max_entries],
+        "transition_counts": dict(
+            sorted(transition_counts.items(), key=lambda item: (-item[1], item[0]))
+        ),
+        "status_changes": status_changes,
+        "status_changes_total": sum(transition_counts.values()),
+        "truncated": len(added) > max_entries or len(removed) > max_entries,
+    }

@@ -5,7 +5,7 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from typing import Literal
 
-Transport = Literal["dns-udp", "dns-tcp", "doh"]
+Transport = Literal["dns-udp", "dns-tcp", "dot", "doh"]
 Status = Literal["accepted", "candidate", "rejected"]
 FilterReason = Literal[
     "source_reliability_below_min",
@@ -13,6 +13,8 @@ FilterReason = Literal[
     "duplicate_dns_candidate",
     "invalid_doh_url",
     "duplicate_doh_candidate",
+    "invalid_dot_endpoint",
+    "duplicate_dot_candidate",
     "historical_dns_quarantine",
 ]
 FilterStage = Literal["source", "normalize", "history"]
@@ -37,6 +39,9 @@ class Candidate:
     def __str__(self) -> str:
         if self.transport == "doh":
             return f"doh:{self.endpoint_url}"
+        if self.transport == "dot":
+            name = self.tls_server_name or self.host
+            return f"dot:{self.host}:{self.port}#{name}"
         return f"{self.transport}:{self.host}:{self.port}"
 
 
@@ -89,6 +94,8 @@ class ValidationResult:
     score_breakdown: dict[str, int] = field(default_factory=dict)
     score_caps_applied: list[str] = field(default_factory=list)
     derived_metrics: dict[str, float | int | None] = field(default_factory=dict)
+    # Measured properties that do not affect scoring (e.g. dnssec_validating).
+    capabilities: dict[str, bool | None] = field(default_factory=dict)
 
     def median_latency_ms(self) -> float | None:
         """Return median latency across successful probes, or None."""

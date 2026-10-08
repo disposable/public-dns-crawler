@@ -20,18 +20,33 @@ class CorpusConfig:
 
 
 @dataclass
+class CapabilitiesConfig:
+    enabled: bool = True
+    dnssec_sentinels: list[str] = field(
+        default_factory=lambda: ["dnssec-failed.org.", "sigfail.verteiltesysteme.net."]
+    )
+    ecs_probe_qname: str = "www.google.com."
+    filter_domains: list[str] = field(
+        default_factory=lambda: ["doubleclick.net.", "ads.yahoo.com.", "pornhub.com."]
+    )
+
+
+@dataclass
 class ValidationConfig:
     rounds: int = 3
     timeout_ms: int = 2000
     parallelism: int = 50
     doh_parallelism: int = 20
+    dot_parallelism: int = 15
     require_tcp_for_dns: bool = False
     require_tls_valid_for_doh: bool = True
+    require_tls_valid_for_dot: bool = True
     revalidation_stable_days: int = 0
     revalidation_stable_rounds: int = 1
     baseline_resolvers: list[str] = field(default_factory=lambda: ["1.1.1.1", "9.9.9.9", "8.8.8.8"])
     corpus: CorpusConfig = field(default_factory=CorpusConfig)
     dns_backend: DnsBackendConfig = field(default_factory=lambda: DnsBackendConfig())
+    capabilities: CapabilitiesConfig = field(default_factory=CapabilitiesConfig)
 
 
 @dataclass
@@ -145,6 +160,7 @@ class SourceEntry:
 class SourcesConfig:
     dns: list[SourceEntry] = field(default_factory=list)
     doh: list[SourceEntry] = field(default_factory=list)
+    dot: list[SourceEntry] = field(default_factory=list)
 
 
 @dataclass
@@ -186,6 +202,7 @@ def load_settings(path: str | Path | None = None) -> Settings:
         src = raw["sources"]
         settings.sources.dns = _parse_source_list(list(src.get("dns", [])))
         settings.sources.doh = _parse_source_list(list(src.get("doh", [])))
+        settings.sources.dot = _parse_source_list(list(src.get("dot", [])))
 
     if "validation" in raw:
         v = raw["validation"]
@@ -194,9 +211,13 @@ def load_settings(path: str | Path | None = None) -> Settings:
         vc.timeout_ms = int(v.get("timeout_ms", vc.timeout_ms))
         vc.parallelism = int(v.get("parallelism", vc.parallelism))
         vc.doh_parallelism = int(v.get("doh_parallelism", vc.doh_parallelism))
+        vc.dot_parallelism = int(v.get("dot_parallelism", vc.dot_parallelism))
         vc.require_tcp_for_dns = bool(v.get("require_tcp_for_dns", vc.require_tcp_for_dns))
         vc.require_tls_valid_for_doh = bool(
             v.get("require_tls_valid_for_doh", vc.require_tls_valid_for_doh)
+        )
+        vc.require_tls_valid_for_dot = bool(
+            v.get("require_tls_valid_for_dot", vc.require_tls_valid_for_dot)
         )
         vc.revalidation_stable_days = int(
             v.get("revalidation_stable_days", vc.revalidation_stable_days)
@@ -206,6 +227,15 @@ def load_settings(path: str | Path | None = None) -> Settings:
         )
         if "baseline" in v:
             vc.baseline_resolvers = list(v["baseline"].get("resolvers", vc.baseline_resolvers))
+        if "capabilities" in v:
+            caps = v["capabilities"]
+            cc = vc.capabilities
+            cc.enabled = bool(caps.get("enabled", cc.enabled))
+            cc.dnssec_sentinels = [
+                str(d) for d in caps.get("dnssec_sentinels", cc.dnssec_sentinels)
+            ]
+            cc.ecs_probe_qname = str(caps.get("ecs_probe_qname", cc.ecs_probe_qname))
+            cc.filter_domains = [str(d) for d in caps.get("filter_domains", cc.filter_domains)]
         if "corpus" in v:
             c = v["corpus"]
             vc.corpus.mode = str(c.get("mode", vc.corpus.mode))

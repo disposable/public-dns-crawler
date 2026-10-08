@@ -617,3 +617,88 @@ class TestRequireTlsValidForDoh:
         result = score(_candidate("dns-udp"), probes, settings)
         assert result.status == "rejected"
         assert "hard_fail_cap" in result.score_caps_applied
+
+
+def _dot_candidate() -> Candidate:
+    return Candidate(
+        provider=None,
+        source="test",
+        transport="dot",
+        endpoint_url=None,
+        host="dns.example.com",
+        port=853,
+        path=None,
+        tls_server_name="dns.example.com",
+    )
+
+
+class TestRequireTlsValidForDot:
+    """require_tls_valid_for_dot controls whether TLS failures are fatal."""
+
+    def _probes_with_tls_failure(self) -> list[ProbeResult]:
+        return [_ok(probe="dot:positive:test") for _ in range(9)] + [
+            _fail(probe="dot:positive:test2", error="tls_name_mismatch:cert name wrong")
+        ]
+
+    def test_tls_failure_hard_fails_when_required(self) -> None:
+        settings = Settings()
+        settings.validation.require_tls_valid_for_dot = True
+        result = score(_dot_candidate(), self._probes_with_tls_failure(), settings)
+        assert result.status == "rejected"
+        assert "tls_name_mismatch" in result.reasons
+        assert "hard_fail_cap" in result.score_caps_applied
+
+    def test_tls_failure_is_soft_penalty_when_not_required(self) -> None:
+        settings = Settings()
+        settings.validation.require_tls_valid_for_dot = False
+        result = score(_dot_candidate(), self._probes_with_tls_failure(), settings)
+        # TLS failure still costs correctness points but does not hard-fail
+        assert "tls_name_mismatch" in result.reasons
+        assert "hard_fail_cap" not in result.score_caps_applied
+        assert result.status != "rejected"
+
+    def test_doh_setting_does_not_relax_dot(self) -> None:
+        # Only require_tls_valid_for_dot relaxes DoT candidates
+        settings = Settings()
+        settings.validation.require_tls_valid_for_doh = False
+        result = score(_dot_candidate(), self._probes_with_tls_failure(), settings)
+        assert result.status == "rejected"
+        assert "hard_fail_cap" in result.score_caps_applied
+
+
+class TestCapabilitiesScoringIsolation:
+    """Capability probes are extracted, not scored."""
+
+    def test_capability_probes_do_not_change_score(self) -> None:
+        probes = [_ok() for _ in range(9)]
+        settings = Settings()
+        baseline = score(_candidate(), list(probes), settings)
+        with_caps = score(
+            _candidate(),
+            [
+                *probes,
+                ProbeResult(
+                    ok=True,
+                    probe="capability:dnssec",
+                    details={"dnssec_validating": "true"},
+                ),
+            ],
+            settings,
+        )
+        assert with_caps.score == baseline.score
+        assert with_caps.capabilities == {"dnssec_validating": True}
+
+    def test_unknown_capability_value_maps_to_none(self) -> None:
+        result = score(
+            _candidate(),
+            [
+                _ok(),
+                ProbeResult(
+                    ok=True,
+                    probe="capability:ecs",
+                    details={"ecs_support": "unknown"},
+                ),
+            ],
+            Settings(),
+        )
+        assert result.capabilities == {"ecs_support": None}

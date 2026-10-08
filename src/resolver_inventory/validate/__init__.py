@@ -16,14 +16,22 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
+import dns.edns
+import dns.message
+import dns.rdatatype
+
 from resolver_inventory.models import Candidate, ProbeResult, ValidationResult
-from resolver_inventory.settings import Settings
+from resolver_inventory.settings import CapabilitiesConfig, Settings
 from resolver_inventory.util.http import build_doh_client
 from resolver_inventory.util.logging import get_logger
 from resolver_inventory.validate.base import (
     fail_probe,
     render_probe_qname,
     resolve_baseline_answers,
+)
+from resolver_inventory.validate.capabilities import (
+    capability_check_names,
+    run_capability_check,
 )
 from resolver_inventory.validate.corpus import Corpus, CorpusEntry, build_corpus
 from resolver_inventory.validate.doh import (
@@ -32,6 +40,11 @@ from resolver_inventory.validate.doh import (
     _probe_nxdomain_doh,
     _probe_positive_doh,
     _probe_tls,
+)
+from resolver_inventory.validate.dot import (
+    _probe_nxdomain_dot,
+    _probe_positive_dot,
+    _query_dot_candidate,
 )
 from resolver_inventory.validate.massdns_backend import (
     run_massdns_batch,
@@ -69,7 +82,7 @@ class _DoHProbeTask:
     kind: str
     candidate_idx: int
     candidate: Candidate
-    entry: CorpusEntry | None
+    entry: CorpusEntry | str | None
 
 
 @dataclass(slots=True)
@@ -219,11 +232,40 @@ def _compute_rounds_map(
     return rounds_map
 
 
-def _candidate_probe_count(candidate: Candidate, corpus: Corpus, rounds: int) -> int:
+def _candidate_probe_count(
+    candidate: Candidate,
+    corpus: Corpus,
+    rounds: int,
+    num_capabilities: int = 0,
+) -> int:
     round_probes = len(corpus.positive) + len(corpus.nxdomain)
     if candidate.transport == "doh":
-        return 1 + (rounds * round_probes)
-    return rounds * round_probes
+        return 1 + (rounds * round_probes) + num_capabilities
+    return rounds * round_probes + num_capabilities
+
+
+def _iter_capability_specs_for_candidate(
+    candidate: Candidate,
+    idx: int,
+    capability_names: list[str],
+) -> Iterator[PlainDnsProbeSpec]:
+    for seq, name in enumerate(capability_names):
+        yield PlainDnsProbeSpec(
+            probe_id=f"{idx}:capability:{seq}",
+            kind="capability",
+            candidate_idx=idx,
+            candidate_transport=candidate.transport,
+            host=candidate.host,
+            port=candidate.port,
+            qname="",
+            rdtype="A",
+            probe_name=f"capability:{name}",
+            is_nxdomain_probe=False,
+            expected_answers=[],
+            baseline_key=None,
+            entry=CorpusEntry(rdtype="A", label=f"capability-{name}"),
+            capability_name=name,
+        )
 
 
 def _iter_plain_dns_specs_for_candidate(
@@ -231,6 +273,7 @@ def _iter_plain_dns_specs_for_candidate(
     idx: int,
     corpus: Corpus,
     rounds: int,
+    capability_names: list[str] | None = None,
 ) -> Iterator[PlainDnsProbeSpec]:
     seq = 0
     for round_idx in range(rounds):
@@ -272,6 +315,8 @@ def _iter_plain_dns_specs_for_candidate(
                 entry=entry,
             )
             seq += 1
+    if capability_names:
+        yield from _iter_capability_specs_for_candidate(candidate, idx, capability_names)
 
 
 def _iter_doh_tasks_for_candidate(
@@ -279,6 +324,7 @@ def _iter_doh_tasks_for_candidate(
     idx: int,
     corpus: Corpus,
     rounds: int,
+    capability_names: list[str] | None = None,
 ) -> Iterator[_DoHProbeTask]:
     if candidate.transport != "doh":
         return
@@ -288,6 +334,26 @@ def _iter_doh_tasks_for_candidate(
             yield _DoHProbeTask("doh_positive", idx, candidate, entry)
         for entry in corpus.nxdomain:
             yield _DoHProbeTask("doh_nxdomain", idx, candidate, entry)
+    for name in capability_names or []:
+        yield _DoHProbeTask("capability", idx, candidate, name)
+
+
+def _iter_dot_tasks_for_candidate(
+    candidate: Candidate,
+    idx: int,
+    corpus: Corpus,
+    rounds: int,
+    capability_names: list[str] | None = None,
+) -> Iterator[_DoHProbeTask]:
+    if candidate.transport != "dot":
+        return
+    for _ in range(rounds):
+        for entry in corpus.positive:
+            yield _DoHProbeTask("dot_positive", idx, candidate, entry)
+        for entry in corpus.nxdomain:
+            yield _DoHProbeTask("dot_nxdomain", idx, candidate, entry)
+    for name in capability_names or []:
+        yield _DoHProbeTask("capability", idx, candidate, name)
 
 
 def _spill_spec(handle, spec: PlainDnsProbeSpec) -> None:
@@ -333,6 +399,7 @@ async def _run_plain_dns_specs(
             baseline_resolvers=baseline_resolvers,
             baseline_cache=baseline_cache,
             parallelism=settings.validation.parallelism,
+            capabilities_config=settings.validation.capabilities,
             on_execution=on_execution,
         )
 
@@ -353,6 +420,7 @@ async def _run_plain_dns_specs(
                 baseline_resolvers=baseline_resolvers,
                 baseline_cache=baseline_cache,
                 parallelism=settings.validation.parallelism,
+                capabilities_config=settings.validation.capabilities,
                 on_execution=on_execution,
             )
         )
@@ -376,6 +444,7 @@ async def _run_plain_dns_specs(
                 baseline_resolvers=baseline_resolvers,
                 baseline_cache=baseline_cache,
                 parallelism=settings.validation.parallelism,
+                capabilities_config=settings.validation.capabilities,
                 on_execution=on_execution,
             )
         out.extend(results)
@@ -387,6 +456,7 @@ def _prepare_plain_dns_work(
     corpus: Corpus,
     rounds: int,
     rounds_map: dict[int, int] | None = None,
+    capability_names: list[str] | None = None,
 ) -> _PreparedPlainDnsWork:
     temp_dir = Path(tempfile.mkdtemp(prefix="resolver-inventory-plain-"))
     rdtype_paths: dict[str, Path] = {}
@@ -397,16 +467,19 @@ def _prepare_plain_dns_work(
     total_probes = 0
     massdns_supported_total = 0
     python_plain_total = 0
+    num_capabilities = len(capability_names or [])
 
     try:
         for idx, candidate in enumerate(candidates):
             candidate_rounds = rounds if rounds_map is None else rounds_map.get(idx, rounds)
-            probes_expected[idx] = _candidate_probe_count(candidate, corpus, candidate_rounds)
+            probes_expected[idx] = _candidate_probe_count(
+                candidate, corpus, candidate_rounds, num_capabilities
+            )
             total_probes += probes_expected[idx]
-            if candidate.transport == "doh":
+            if candidate.transport not in ("dns-udp", "dns-tcp"):
                 continue
             for spec in _iter_plain_dns_specs_for_candidate(
-                candidate, idx, corpus, candidate_rounds
+                candidate, idx, corpus, candidate_rounds, capability_names
             ):
                 if supports_massdns_phase1(spec):
                     path = rdtype_paths.setdefault(
@@ -458,6 +531,7 @@ async def _run_python_plain_specs_from_file(
                 baseline_resolvers=baseline_resolvers,
                 baseline_cache=baseline_cache,
                 parallelism=settings.validation.parallelism,
+                capabilities_config=settings.validation.capabilities,
                 on_execution=on_execution,
             )
             batch = []
@@ -468,6 +542,7 @@ async def _run_python_plain_specs_from_file(
             baseline_resolvers=baseline_resolvers,
             baseline_cache=baseline_cache,
             parallelism=settings.validation.parallelism,
+            capabilities_config=settings.validation.capabilities,
             on_execution=on_execution,
         )
 
@@ -478,12 +553,13 @@ async def _execute_doh_probe(
     baseline_resolvers: list[str],
     baseline_cache: dict[tuple[str, str], list[str]],
     doh_clients: dict[int, Any],
+    capabilities_config: CapabilitiesConfig,
 ) -> ProbeResult:
     candidate = task.candidate
     if task.kind == "doh_tls":
         return await _probe_tls(candidate, timeout_s)
     if task.kind == "doh_positive":
-        assert task.entry is not None
+        assert isinstance(task.entry, CorpusEntry)
         return await _probe_positive_doh(
             task.entry,
             doh_clients[task.candidate_idx],
@@ -493,11 +569,111 @@ async def _execute_doh_probe(
             baseline_cache,
         )
     if task.kind == "doh_nxdomain":
-        assert task.entry is not None
+        assert isinstance(task.entry, CorpusEntry)
         return await _probe_nxdomain_doh(
             task.entry,
             doh_clients[task.candidate_idx],
             candidate.endpoint_url or "",
+        )
+    if task.kind == "capability":
+        client = doh_clients[task.candidate_idx]
+        url = candidate.endpoint_url or ""
+
+        async def _send(
+            qname: str,
+            rdtype: str,
+            *,
+            want_dnssec: bool = False,
+            ecs: tuple[str, int] | None = None,
+        ) -> dns.message.Message:
+            options: list[dns.edns.Option] | None = None
+            if ecs is not None:
+                options = [dns.edns.ECSOption(ecs[0], ecs[1])]
+            msg = dns.message.make_query(
+                qname,
+                dns.rdatatype.from_text(rdtype),
+                use_edns=0 if (want_dnssec or ecs is not None) else None,
+                want_dnssec=want_dnssec,
+                options=options,
+            )
+            msg.id = 0
+            resp, _ = await _doh_post(client, url, msg.to_wire())
+            return resp
+
+        async def _baseline(qname: str, rdtype: str) -> list[str]:
+            return await resolve_baseline_answers(
+                qname, rdtype, baseline_resolvers, timeout_s, baseline_cache
+            )
+
+        return await run_capability_check(
+            str(task.entry),
+            _send,
+            capabilities_config,
+            resolve_baseline=_baseline,
+        )
+    return fail_probe(f"unknown:{task.kind}", "internal_error")
+
+
+async def _execute_dot_probe(
+    task: _DoHProbeTask,
+    timeout_s: float,
+    baseline_resolvers: list[str],
+    baseline_cache: dict[tuple[str, str], list[str]],
+    capabilities_config: CapabilitiesConfig,
+    addr_cache: dict[str, list[str]] | None = None,
+) -> ProbeResult:
+    candidate = task.candidate
+    if task.kind == "dot_positive":
+        assert isinstance(task.entry, CorpusEntry)
+        return await _probe_positive_dot(
+            task.entry,
+            candidate,
+            timeout_s,
+            baseline_resolvers,
+            baseline_cache,
+            addr_cache,
+        )
+    if task.kind == "dot_nxdomain":
+        assert isinstance(task.entry, CorpusEntry)
+        return await _probe_nxdomain_dot(task.entry, candidate, timeout_s, addr_cache)
+    if task.kind == "capability":
+
+        async def _send(
+            qname: str,
+            rdtype: str,
+            *,
+            want_dnssec: bool = False,
+            ecs: tuple[str, int] | None = None,
+        ) -> dns.message.Message:
+            options: list[dns.edns.Option] | None = None
+            if ecs is not None:
+                options = [dns.edns.ECSOption(ecs[0], ecs[1])]
+            msg = dns.message.make_query(
+                qname,
+                dns.rdatatype.from_text(rdtype),
+                use_edns=0 if (want_dnssec or ecs is not None) else None,
+                want_dnssec=want_dnssec,
+                options=options,
+            )
+            msg.id = 0
+            resp, _ = await _query_dot_candidate(
+                candidate,
+                msg,
+                timeout_s,
+                addr_cache,
+            )
+            return resp
+
+        async def _baseline(qname: str, rdtype: str) -> list[str]:
+            return await resolve_baseline_answers(
+                qname, rdtype, baseline_resolvers, timeout_s, baseline_cache
+            )
+
+        return await run_capability_check(
+            str(task.entry),
+            _send,
+            capabilities_config,
+            resolve_baseline=_baseline,
         )
     return fail_probe(f"unknown:{task.kind}", "internal_error")
 
@@ -509,6 +685,7 @@ async def _run_doh_phase(
     baseline_cache: dict[tuple[str, str], list[str]],
     accumulator: _ValidationAccumulator,
     rounds_map: dict[int, int] | None = None,
+    capability_names: list[str] | None = None,
 ) -> None:
     timeout_s = settings.validation.timeout_ms / 1000.0
     baseline_resolvers = settings.validation.baseline_resolvers
@@ -531,6 +708,7 @@ async def _run_doh_phase(
                     settings.validation.rounds
                     if rounds_map is None
                     else rounds_map.get(idx, settings.validation.rounds),
+                    capability_names,
                 )
             )
         if not tasks:
@@ -570,6 +748,7 @@ async def _run_doh_phase(
                             baseline_resolvers,
                             baseline_cache,
                             doh_clients,
+                            settings.validation.capabilities,
                         )
                     except Exception as exc:
                         logger.warning(
@@ -605,6 +784,96 @@ async def _run_doh_phase(
                 await client.aclose()
 
 
+async def _run_dot_phase(
+    candidates: list[Candidate],
+    settings: Settings,
+    corpus: Corpus,
+    baseline_cache: dict[tuple[str, str], list[str]],
+    accumulator: _ValidationAccumulator,
+    rounds_map: dict[int, int] | None = None,
+    capability_names: list[str] | None = None,
+) -> None:
+    timeout_s = settings.validation.timeout_ms / 1000.0
+    baseline_resolvers = settings.validation.baseline_resolvers
+    window_size = max(1, settings.validation.dot_parallelism)
+
+    for start_idx in range(0, len(candidates), window_size):
+        window = candidates[start_idx : start_idx + window_size]
+        tasks: list[_DoHProbeTask] = []
+        addr_cache: dict[str, list[str]] = {}
+        for offset, candidate in enumerate(window):
+            idx = start_idx + offset
+            if candidate.transport != "dot":
+                continue
+            tasks.extend(
+                _iter_dot_tasks_for_candidate(
+                    candidate,
+                    idx,
+                    corpus,
+                    settings.validation.rounds
+                    if rounds_map is None
+                    else rounds_map.get(idx, settings.validation.rounds),
+                    capability_names,
+                )
+            )
+        if not tasks:
+            continue
+
+        queue: asyncio.Queue[_DoHProbeTask] = asyncio.Queue()
+        for task in tasks:
+            queue.put_nowait(task)
+
+        async def worker(
+            queue: asyncio.Queue[_DoHProbeTask] = queue,
+            addr_cache: dict[str, list[str]] = addr_cache,
+        ) -> None:
+            while True:
+                try:
+                    task = queue.get_nowait()
+                except asyncio.QueueEmpty:
+                    return
+                try:
+                    try:
+                        result = await _execute_dot_probe(
+                            task,
+                            timeout_s,
+                            baseline_resolvers,
+                            baseline_cache,
+                            settings.validation.capabilities,
+                            addr_cache,
+                        )
+                    except Exception as exc:
+                        logger.warning(
+                            "DoT %s probe for %s raised: %s",
+                            task.kind,
+                            task.candidate.host,
+                            exc,
+                        )
+                        result = fail_probe(
+                            f"dot:{task.kind}",
+                            f"internal_error:{exc!s:.120}",
+                        )
+                    await accumulator.record_probe(task.candidate_idx, result)
+                except Exception:
+                    logger.exception(
+                        "DoT worker failed to record probe result for %s",
+                        task.candidate.host,
+                    )
+                finally:
+                    queue.task_done()
+
+        worker_count = max(1, min(settings.validation.dot_parallelism, len(tasks)))
+        worker_tasks = [asyncio.create_task(worker()) for _ in range(worker_count)]
+        try:
+            await queue.join()
+        finally:
+            for wt in worker_tasks:
+                wt.cancel()
+            for wt in worker_tasks:
+                with contextlib.suppress(asyncio.CancelledError):
+                    await wt
+
+
 async def _validate_candidates_async(
     candidates: list[Candidate],
     settings: Settings,
@@ -619,6 +888,7 @@ async def _validate_candidates_async(
     if not candidates:
         return
 
+    capability_names = capability_check_names(settings.validation.capabilities)
     rounds_map = _compute_rounds_map(
         candidates,
         settings,
@@ -630,6 +900,7 @@ async def _validate_candidates_async(
         corpus,
         settings.validation.rounds,
         rounds_map,
+        capability_names,
     )
     accumulator = _ValidationAccumulator(
         candidates,
@@ -754,6 +1025,16 @@ async def _validate_candidates_async(
             baseline_cache,
             accumulator,
             rounds_map,
+            capability_names,
+        )
+        await _run_dot_phase(
+            candidates,
+            settings,
+            corpus,
+            baseline_cache,
+            accumulator,
+            rounds_map,
+            capability_names,
         )
         accumulator.finalize_remaining()
     finally:
