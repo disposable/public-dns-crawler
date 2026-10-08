@@ -5,7 +5,7 @@ from __future__ import annotations
 import re
 import tomllib
 from pathlib import Path
-from urllib.parse import urlparse
+from urllib.parse import unquote, urlparse
 
 from resolver_inventory.models import Candidate
 from resolver_inventory.sources.adguard import PROVIDERS_URL
@@ -35,7 +35,7 @@ class AdGuardDotSource(BaseSource):
             return []
 
         current_provider: str | None = None
-        seen: set[tuple[str, int]] = set()
+        seen: set[tuple[str, int, str]] = set()
         results: list[Candidate] = []
         for line in data.splitlines():
             heading = _HEADING_RE.match(line.strip())
@@ -48,10 +48,10 @@ class AdGuardDotSource(BaseSource):
                 continue
 
             endpoint = match.group("url").rstrip(".,;)")
-            host, port = _parse_dot_url(endpoint)
+            host, port, tls_name = _parse_dot_url(endpoint)
             if not host:
                 continue
-            key = (host, port)
+            key = (host, port, tls_name or "")
             if key in seen:
                 continue
             seen.add(key)
@@ -64,7 +64,7 @@ class AdGuardDotSource(BaseSource):
                     host=host,
                     port=port,
                     path=None,
-                    tls_server_name=host,
+                    tls_server_name=tls_name or host,
                 )
             )
         logger.info("adguard-dot: found %d DoT endpoints", len(results))
@@ -136,12 +136,18 @@ class ManualDotSource(BaseSource):
         return results
 
 
-def _parse_dot_url(url: str) -> tuple[str, int]:
-    """Extract (host, port) from a tls:// DoT URL."""
+def _parse_dot_url(url: str) -> tuple[str, int, str | None]:
+    """Extract (host, port, tls_name) from a tls:// DoT URL.
+
+    A ``#name`` fragment carries the TLS authentication name for IP-literal
+    endpoints (``tls://9.9.9.9#dns.quad9.net``), matching the convention
+    used by the text exporter, Unbound, and systemd-resolved.
+    """
     parsed = urlparse(url)
     host = parsed.hostname or ""
     try:
         port = parsed.port or DEFAULT_DOT_PORT
     except ValueError:
         port = DEFAULT_DOT_PORT
-    return host, port
+    tls_name = unquote(parsed.fragment).strip() if parsed.fragment else None
+    return host, port, tls_name

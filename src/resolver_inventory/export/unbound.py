@@ -62,7 +62,7 @@ def export_unbound(
         if c.transport != "dot":
             continue
         tls_name = c.tls_server_name or ""
-        key = f"{c.host}|{tls_name}"
+        key = f"{c.host}|{c.port}|{tls_name}"
         if key in seen:
             continue
         seen.add(key)
@@ -70,7 +70,8 @@ def export_unbound(
         if _is_ip(c.host):
             forward_lines.append(f"    forward-addr: {c.host}@{c.port}{name_suffix}")
         else:
-            forward_lines.append(f"    forward-host: {c.host}{name_suffix}")
+            port_suffix = f"@{c.port}" if c.port != 853 else ""
+            forward_lines.append(f"    forward-host: {c.host}{port_suffix}{name_suffix}")
 
     lines = [_HEADER, "forward-zone:"]
     lines.append(f'    name: "{forward_zone}"')

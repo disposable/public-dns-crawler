@@ -411,6 +411,70 @@ class TestResolverKeyNormalization:
         assert url == "https://dns.example.com/query"
         assert port is None
 
+    def test_normalize_dot_key_hostname(self) -> None:
+        candidate = Candidate(
+            provider=None,
+            source="test",
+            transport="dot",
+            endpoint_url=None,
+            host="dns.quad9.net",
+            port=853,
+            path=None,
+            tls_server_name="dns.quad9.net",
+        )
+        assert normalize_resolver_key(candidate) == "dot|dns.quad9.net|853"
+
+    def test_normalize_dot_key_ip_with_tls_name(self) -> None:
+        """An IP endpoint's TLS auth name is part of its identity - two
+        endpoints on the same address with different names must not collide
+        on the (run_id, resolver_key) primary key."""
+        a = Candidate(
+            provider=None,
+            source="test",
+            transport="dot",
+            endpoint_url=None,
+            host="9.9.9.9",
+            port=853,
+            path=None,
+            tls_server_name="dns.quad9.net",
+        )
+        b = Candidate(
+            provider=None,
+            source="test",
+            transport="dot",
+            endpoint_url=None,
+            host="9.9.9.9",
+            port=853,
+            path=None,
+            tls_server_name="other.name.example",
+        )
+        assert normalize_resolver_key(a) == "dot|9.9.9.9|853|dns.quad9.net"
+        assert normalize_resolver_key(b) == "dot|9.9.9.9|853|other.name.example"
+
+    def test_normalize_dot_key_ip_without_tls_name(self) -> None:
+        candidate = Candidate(
+            provider=None,
+            source="test",
+            transport="dot",
+            endpoint_url=None,
+            host="9.9.9.9",
+            port=853,
+            path=None,
+        )
+        assert normalize_resolver_key(candidate) == "dot|9.9.9.9|853"
+
+    def test_parse_dot_key_with_tls_name(self) -> None:
+        transport, host, port = parse_resolver_key("dot|9.9.9.9|853|dns.quad9.net")
+        assert transport == "dot"
+        assert host == "9.9.9.9"
+        assert port == 853
+
+    def test_parse_dot_key_default_port(self) -> None:
+        transport, host, port = parse_resolver_key("dot|dns.quad9.net")
+        assert transport == "dot"
+        assert host == "dns.quad9.net"
+        assert port == 853
+
     def test_same_host_different_transports_different_keys(self) -> None:
         """Same host on UDP and TCP should have different resolver_keys."""
         udp_candidate = Candidate(
@@ -1197,6 +1261,30 @@ class TestChangelog:
         assert changelog is not None
         assert changelog["added_count"] == 7
         assert len(changelog["added"]) == 3
+        assert changelog["truncated"] is True
+
+    def test_truncation_covers_status_changes(self, tmp_path) -> None:
+        db_path = tmp_path / "history.duckdb"
+        with connect_history_db(db_path) as connection:
+            update_history(
+                connection,
+                _metadata(date(2026, 1, 1)),
+                [_dns_result(f"10.0.0.{i}", "dns-udp", "accepted") for i in range(1, 8)],
+                [],
+            )
+            update_history(
+                connection,
+                _metadata(date(2026, 1, 2)),
+                [_dns_result(f"10.0.0.{i}", "dns-udp", "rejected") for i in range(1, 8)],
+                [],
+            )
+            from resolver_inventory.history import compute_changelog
+
+            changelog = compute_changelog(connection, max_entries=3)
+
+        assert changelog is not None
+        assert changelog["status_changes_total"] == 7
+        assert len(changelog["status_changes"]) == 3
         assert changelog["truncated"] is True
 
     def test_readme_section_renders_changelog(self) -> None:

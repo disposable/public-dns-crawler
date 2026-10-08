@@ -592,7 +592,9 @@ History is tracked per-endpoint using a canonical `resolver_key`:
 
 - **DNS UDP**: `dns-udp|host|port` (e.g., `dns-udp|1.1.1.1|53`)
 - **DNS TCP**: `dns-tcp|host|port` (e.g., `dns-tcp|1.1.1.1|53`)
-- **DoT**: `dot|host|port` (e.g., `dot|dns.quad9.net|853`)
+- **DoT**: `dot|host|port` (e.g., `dot|dns.quad9.net|853`), or
+  `dot|host|port|tls_name` when the TLS authentication name differs from
+  the connect host (e.g., `dot|9.9.9.9|853|dns.quad9.net`)
 - **DoH**: `doh|url` (e.g., `doh|https://dns.example.com/dns-query`)
 
 This allows:

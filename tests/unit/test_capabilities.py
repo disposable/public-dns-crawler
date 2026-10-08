@@ -163,6 +163,18 @@ class TestFilteringCheck:
         )
         assert probe.details["filters_detected"] == "false"
 
+    @pytest.mark.asyncio
+    async def test_error_rcode_is_inconclusive_not_unfiltered(self) -> None:
+        """REFUSED/SERVFAIL responses are not evidence of no-filtering."""
+
+        async def execute(qname: str, rdtype: str, **kwargs: object) -> dns.message.Message:
+            return _response(rcode=dns.rcode.REFUSED)
+
+        probe = await run_capability_check(
+            "filtering", execute, _config(filter_domains=["ads.test."])
+        )
+        assert probe.details["filters_detected"] == "unknown"
+
 
 class TestCapabilityProbeIsolation:
     def test_capability_probes_excluded_from_score_math(self) -> None:
@@ -236,3 +248,30 @@ class TestCapabilityProbeIsolation:
         probe = await run_capability_check("does-not-exist", execute, _config())
         assert probe.ok
         assert probe.probe == "capability:does-not-exist"
+
+    @pytest.mark.asyncio
+    async def test_check_internal_error_uses_canonical_key(self) -> None:
+        """An unexpected check error must still emit the canonical
+        capability key (with an unknown value), not the check name."""
+
+        async def execute(qname: str, rdtype: str, **kwargs: object) -> dns.message.Message:
+            msg = _response()
+            # Remove the answer attribute to break _check_filtering internals.
+            del msg.answer
+            return msg
+
+        probe = await run_capability_check(
+            "filtering", execute, _config(filter_domains=["a.test."])
+        )
+        assert probe.ok
+        assert probe.details["filters_detected"] == "unknown"
+        assert "filtering" not in probe.details
+
+    @pytest.mark.asyncio
+    async def test_disabled_config_reports_unknown(self) -> None:
+        async def execute(qname: str, rdtype: str, **kwargs: object) -> dns.message.Message:
+            return _response(rcode=dns.rcode.SERVFAIL)
+
+        probe = await run_capability_check("dnssec", execute, _config(enabled=False))
+        assert probe.ok
+        assert probe.details["dnssec_validating"] == "unknown"

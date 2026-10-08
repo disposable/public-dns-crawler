@@ -21,11 +21,12 @@ def _format_dot_endpoint(host: str, port: int, tls_server_name: str | None) -> s
     name), matching the ``host#name`` convention used by Unbound and
     systemd-resolved.
     """
+    display_host = f"[{host}]" if ":" in host else host
     suffix = f":{port}" if port != 853 else ""
     name_suffix = ""
     if tls_server_name and tls_server_name != host:
         name_suffix = f"#{tls_server_name}"
-    return f"tls://{host}{suffix}{name_suffix}"
+    return f"tls://{display_host}{suffix}{name_suffix}"
 
 
 def export_text(

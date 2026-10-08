@@ -169,6 +169,25 @@ class TestAdGuardDotSource:
         candidates = AdGuardDotSource(SourceEntry(type="adguard")).candidates()
         assert candidates == []
 
+    def test_fragment_carries_tls_auth_name(self, monkeypatch) -> None:
+        """tls://ip#name endpoints keep the fragment as tls_server_name."""
+        body = """
+### Provider
+
+| DNS-over-TLS | `tls://9.9.9.9#dns.quad9.net` | |
+"""
+
+        def fake_urlopen(url: str, timeout: int = 30) -> _FakeResponse:
+            return _FakeResponse(body)
+
+        monkeypatch.setattr(urllib.request, "urlopen", fake_urlopen)
+
+        candidates = AdGuardDotSource(SourceEntry(type="adguard")).candidates()
+        assert len(candidates) == 1
+        assert candidates[0].host == "9.9.9.9"
+        assert candidates[0].port == 853
+        assert candidates[0].tls_server_name == "dns.quad9.net"
+
 
 class TestManualDotSource:
     def test_parses_endpoints_file(self, tmp_path) -> None:

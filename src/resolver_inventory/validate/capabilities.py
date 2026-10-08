@@ -26,6 +26,13 @@ logger = get_logger(__name__)
 # Answers that indicate a sinkholed/filtered response rather than a real one.
 _SINKHOLE_ANSWERS = frozenset({"0.0.0.0", "::"})
 
+# Check name -> canonical capability key emitted in probe details.
+_CAPABILITY_KEY_BY_NAME = {
+    "dnssec": "dnssec_validating",
+    "ecs": "ecs_support",
+    "filtering": "filters_detected",
+}
+
 
 class CapabilityQueryExecutor(Protocol):
     """Transport-specific query primitive used by capability checks."""
@@ -62,6 +69,12 @@ async def run_capability_check(
     resolve_baseline: Callable[[str, str], Awaitable[list[str]]] | None = None,
 ) -> ProbeResult:
     """Run one capability check and wrap the outcome in a ProbeResult."""
+    if not config.enabled:
+        return ProbeResult(
+            ok=True,
+            probe=f"capability:{name}",
+            details={_CAPABILITY_KEY_BY_NAME.get(name, name): "unknown"},
+        )
     try:
         if name == "dnssec":
             details = await _check_dnssec(execute, config.dnssec_sentinels)
@@ -70,10 +83,10 @@ async def run_capability_check(
         elif name == "filtering":
             details = await _check_filtering(execute, config.filter_domains, resolve_baseline)
         else:
-            details = {name: "unknown", "error": "unknown_check"}
+            details = {_CAPABILITY_KEY_BY_NAME.get(name, name): "unknown", "error": "unknown_check"}
     except Exception as exc:  # never let a capability check crash validation
         logger.debug("capability check %s failed: %s", name, exc)
-        details = {name: "unknown", "error": str(exc)[:80]}
+        details = {_CAPABILITY_KEY_BY_NAME.get(name, name): "unknown", "error": str(exc)[:80]}
     return ProbeResult(ok=True, probe=f"capability:{name}", details=details)
 
 
@@ -118,6 +131,10 @@ async def _check_filtering(
         try:
             resp = await execute(qname, "A")
         except Exception:
+            continue
+        # Only conclusive responses count: an error rcode (REFUSED,
+        # SERVFAIL, ...) is no evidence either way.
+        if resp.rcode() not in (dns.rcode.NOERROR, dns.rcode.NXDOMAIN):
             continue
         saw_answer = True
         answers = {

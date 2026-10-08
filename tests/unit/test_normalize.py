@@ -262,3 +262,43 @@ class TestNormalizeDot:
         result = normalize_dot_candidates([c])
         assert result[0].bootstrap_ipv4 == ["192.0.2.1"]
         assert result[0].bootstrap_ipv6 == ["2001:db8::1"]
+
+    def test_explicit_tls_name_equal_to_host_dedupes_with_implicit(self) -> None:
+        """A redundant explicit name must not produce a second endpoint -
+        both forms collapse to the same resolver key."""
+        filtered: list[FilteredCandidate] = []
+        result = normalize_dot_candidates(
+            [_dot("192.0.2.1"), _dot("192.0.2.1", tls_server_name="192.0.2.1")],
+            filtered=filtered,
+        )
+        assert len(result) == 1
+        assert filtered[0].reason == "duplicate_dot_candidate"
+
+    def test_invalid_bootstrap_ipv4_dropped(self) -> None:
+        filtered: list[FilteredCandidate] = []
+        c = _dot("dns.example.com")
+        c.bootstrap_ipv4 = ["not-an-ip"]
+        result = normalize_dot_candidates([c], filtered=filtered)
+        assert result == []
+        assert filtered[0].reason == "invalid_dot_endpoint"
+
+    def test_wrong_family_bootstrap_dropped(self) -> None:
+        filtered: list[FilteredCandidate] = []
+        c = _dot("dns.example.com")
+        c.bootstrap_ipv4 = ["2001:db8::1"]
+        result = normalize_dot_candidates([c], filtered=filtered)
+        assert result == []
+        assert filtered[0].reason == "invalid_dot_endpoint"
+
+    def test_invalid_tls_server_name_dropped(self) -> None:
+        filtered: list[FilteredCandidate] = []
+        result = normalize_dot_candidates(
+            [_dot("192.0.2.1", tls_server_name="not a host!")],
+            filtered=filtered,
+        )
+        assert result == []
+        assert filtered[0].reason == "invalid_dot_endpoint"
+
+    def test_tls_server_name_normalized(self) -> None:
+        result = normalize_dot_candidates([_dot("192.0.2.1", tls_server_name="DNS.Example.COM.")])
+        assert result[0].tls_server_name == "dns.example.com"

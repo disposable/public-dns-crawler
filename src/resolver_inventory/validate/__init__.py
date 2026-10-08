@@ -621,6 +621,7 @@ async def _execute_dot_probe(
     baseline_cache: dict[tuple[str, str], list[str]],
     capabilities_config: CapabilitiesConfig,
     addr_cache: dict[str, list[str]] | None = None,
+    addr_locks: dict[str, asyncio.Lock] | None = None,
 ) -> ProbeResult:
     candidate = task.candidate
     if task.kind == "dot_positive":
@@ -632,10 +633,11 @@ async def _execute_dot_probe(
             baseline_resolvers,
             baseline_cache,
             addr_cache,
+            addr_locks,
         )
     if task.kind == "dot_nxdomain":
         assert isinstance(task.entry, CorpusEntry)
-        return await _probe_nxdomain_dot(task.entry, candidate, timeout_s, addr_cache)
+        return await _probe_nxdomain_dot(task.entry, candidate, timeout_s, addr_cache, addr_locks)
     if task.kind == "capability":
 
         async def _send(
@@ -661,6 +663,7 @@ async def _execute_dot_probe(
                 msg,
                 timeout_s,
                 addr_cache,
+                addr_locks,
             )
             return resp
 
@@ -757,8 +760,15 @@ async def _run_doh_phase(
                             task.candidate.host,
                             exc,
                         )
+                        # Keep the capability: prefix so a crashed check is
+                        # still partitioned out of scoring math.
+                        fallback_name = (
+                            f"capability:{task.entry}"
+                            if task.kind == "capability"
+                            else f"doh:{task.kind}"
+                        )
                         result = fail_probe(
-                            f"doh:{task.kind}",
+                            fallback_name,
                             f"internal_error:{exc!s:.120}",
                         )
                     await accumulator.record_probe(task.candidate_idx, result)
@@ -801,6 +811,7 @@ async def _run_dot_phase(
         window = candidates[start_idx : start_idx + window_size]
         tasks: list[_DoHProbeTask] = []
         addr_cache: dict[str, list[str]] = {}
+        addr_locks: dict[str, asyncio.Lock] = {}
         for offset, candidate in enumerate(window):
             idx = start_idx + offset
             if candidate.transport != "dot":
@@ -826,6 +837,7 @@ async def _run_dot_phase(
         async def worker(
             queue: asyncio.Queue[_DoHProbeTask] = queue,
             addr_cache: dict[str, list[str]] = addr_cache,
+            addr_locks: dict[str, asyncio.Lock] = addr_locks,
         ) -> None:
             while True:
                 try:
@@ -841,6 +853,7 @@ async def _run_dot_phase(
                             baseline_cache,
                             settings.validation.capabilities,
                             addr_cache,
+                            addr_locks,
                         )
                     except Exception as exc:
                         logger.warning(
@@ -849,8 +862,15 @@ async def _run_dot_phase(
                             task.candidate.host,
                             exc,
                         )
+                        # Keep the capability: prefix so a crashed check is
+                        # still partitioned out of scoring math.
+                        fallback_name = (
+                            f"capability:{task.entry}"
+                            if task.kind == "capability"
+                            else f"dot:{task.kind}"
+                        )
                         result = fail_probe(
-                            f"dot:{task.kind}",
+                            fallback_name,
                             f"internal_error:{exc!s:.120}",
                         )
                     await accumulator.record_probe(task.candidate_idx, result)

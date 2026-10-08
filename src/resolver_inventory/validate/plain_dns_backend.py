@@ -49,6 +49,9 @@ class PlainDnsProbeExecution:
     result: ProbeResult
 
 
+PlainDnsExecutionCallback = Callable[[PlainDnsProbeExecution], Awaitable[None]]
+
+
 class PlainDnsBatchRunner(Protocol):
     async def __call__(
         self,
@@ -58,10 +61,9 @@ class PlainDnsBatchRunner(Protocol):
         baseline_resolvers: list[str],
         baseline_cache: dict[tuple[str, str], list[str]],
         parallelism: int,
+        capabilities_config: CapabilitiesConfig | None = None,
+        on_execution: PlainDnsExecutionCallback | None = None,
     ) -> list[PlainDnsProbeExecution]: ...
-
-
-PlainDnsExecutionCallback = Callable[[PlainDnsProbeExecution], Awaitable[None]]
 
 
 def supports_massdns_phase1(spec: PlainDnsProbeSpec) -> bool:
@@ -214,12 +216,15 @@ async def run_python_plain_dns_batch(
                     baseline_cache,
                 )
             elif spec.kind == "capability":
+                # A missing config means the caller did not opt in; use a
+                # disabled config so checks report "unknown" instead of
+                # silently probing the default sentinels.
                 result = await _probe_capability(
                     spec,
                     timeout_s,
                     baseline_resolvers,
                     baseline_cache,
-                    capabilities_config or CapabilitiesConfig(),
+                    capabilities_config or CapabilitiesConfig(enabled=False),
                 )
             else:
                 result = await _probe_nxdomain(

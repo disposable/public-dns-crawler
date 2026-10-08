@@ -293,6 +293,14 @@ class TestTextExport:
         assert "dot.example" not in export_text([_dot_result(host="dot.example.com")])
         assert "tls://" not in export_text([_dot_result()], transport="doh")
 
+    def test_dot_ipv6_endpoint_is_bracketed(self) -> None:
+        text = export_text(
+            [_dot_result(host="2001:db8::1", tls_server_name="dns.example.com")],
+            transport="dot",
+        )
+        assert "tls://[2001:db8::1]#dns.example.com" in text
+        assert "tls://2001:db8::1" not in text
+
 
 class TestDnsdistExport:
     def test_dns_backend_present(self) -> None:
@@ -382,3 +390,18 @@ class TestUnboundExport:
         text = export_unbound([_dot_result()])
         assert "forward-addr:" not in text
         assert "forward-tls-upstream" not in text
+
+    def test_tls_mode_same_host_different_ports_both_emitted(self) -> None:
+        text = export_unbound(
+            [
+                _dot_result(host="192.0.2.1", port=853),
+                _dot_result(host="192.0.2.1", port=8853),
+            ],
+            use_tls=True,
+        )
+        assert "forward-addr: 192.0.2.1@853" in text
+        assert "forward-addr: 192.0.2.1@8853" in text
+
+    def test_tls_mode_hostname_non_default_port(self) -> None:
+        text = export_unbound([_dot_result(port=8853)], use_tls=True)
+        assert "forward-host: dns.example.com@8853#dns.example.com" in text

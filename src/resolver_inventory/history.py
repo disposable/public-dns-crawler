@@ -60,7 +60,9 @@ def normalize_resolver_key(candidate: Candidate) -> str:
     Format:
     - dns-udp|host|port
     - dns-tcp|host|port
-    - dot|host|port
+    - dot|host|port  (or dot|host|port|tls_name when the TLS auth name
+      differs from the host - endpoints on the same address with different
+      certificate identities are distinct resolvers)
     - doh|url (canonicalized)
 
     This allows distinguishing:
@@ -73,6 +75,12 @@ def normalize_resolver_key(candidate: Candidate) -> str:
         if not url:
             url = candidate.endpoint_url or ""
         return f"doh|{url}"
+    elif candidate.transport == "dot":
+        key = f"dot|{candidate.host}|{candidate.port}"
+        tls_name = candidate.tls_server_name or candidate.host
+        if tls_name != candidate.host:
+            key += f"|{tls_name}"
+        return key
     else:
         # For plain DNS, use transport|host|port
         return f"{candidate.transport}|{candidate.host}|{candidate.port}"
@@ -90,11 +98,16 @@ def parse_resolver_key(resolver_key: str) -> tuple[str, str, int | None]:
     if transport == "doh":
         return (transport, remainder, None)
 
-    host, _, port_text = remainder.partition("|")
+    # DoT keys may carry a fourth "|tls_name" segment; it is part of the
+    # resolver identity, not the host or port, so it is ignored here.
+    parts = remainder.split("|")
+    host = parts[0]
+    port_text = parts[1] if len(parts) > 1 else ""
+    default_port = 853 if transport == "dot" else 53
     try:
-        port = int(port_text) if port_text else 53
+        port = int(port_text) if port_text else default_port
     except ValueError:
-        port = 53
+        port = default_port
     return (transport, host, port)
 
 
@@ -1207,5 +1220,9 @@ def compute_changelog(connection, *, max_entries: int = 200) -> dict[str, Any] |
         ),
         "status_changes": status_changes,
         "status_changes_total": sum(transition_counts.values()),
-        "truncated": len(added) > max_entries or len(removed) > max_entries,
+        "truncated": (
+            len(added) > max_entries
+            or len(removed) > max_entries
+            or sum(transition_counts.values()) > max_entries
+        ),
     }

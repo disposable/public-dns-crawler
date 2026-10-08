@@ -18,11 +18,17 @@ def main() -> int:
     with connect_history_db(args.history_db) as connection:
         changelog = compute_changelog(connection)
 
+    out = Path(args.output)
     if changelog is None:
-        print("generate_changelog: fewer than two runs recorded; nothing to diff")
+        # Remove any stale file so consumers never see a diff for runs that
+        # are no longer the latest two.
+        if out.exists():
+            out.unlink()
+            print("generate_changelog: fewer than two runs recorded; removed stale output")
+        else:
+            print("generate_changelog: fewer than two runs recorded; nothing to diff")
         return 0
 
-    out = Path(args.output)
     out.parent.mkdir(parents=True, exist_ok=True)
     out.write_text(
         json.dumps(changelog, indent=2, ensure_ascii=False) + "\n",

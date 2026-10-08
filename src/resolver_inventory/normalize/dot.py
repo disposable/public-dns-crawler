@@ -30,7 +30,13 @@ def normalize_dot_candidates(
             continue
         host = _normalize_dot_host(c.host)
         port = c.port or 853
-        if not host or port <= 0 or port > 65535:
+        if (
+            not host
+            or port <= 0
+            or port > 65535
+            or not _valid_bootstrap(c.bootstrap_ipv4, 4)
+            or not _valid_bootstrap(c.bootstrap_ipv6, 6)
+        ):
             if filtered is not None:
                 filtered.append(
                     FilteredCandidate(
@@ -41,10 +47,25 @@ def normalize_dot_candidates(
                     )
                 )
             continue
-        tls_server_name = (c.tls_server_name or "").strip() or (
+        tls_server_name = (c.tls_server_name or "").strip().rstrip(".").lower() or (
             host if _is_hostname(host) else None
         )
-        key = (host, port, tls_server_name or "")
+        # An explicit auth name must itself be a valid hostname or IP literal.
+        if c.tls_server_name and not (tls_server_name and _is_hostname_or_ip(tls_server_name)):
+            if filtered is not None:
+                filtered.append(
+                    FilteredCandidate(
+                        candidate=c,
+                        reason="invalid_dot_endpoint",
+                        detail=f"DoT tls_server_name {c.tls_server_name!r} is not valid",
+                        stage="normalize",
+                    )
+                )
+            continue
+        # Dedup on the effective TLS name so an explicit name equal to the
+        # host collapses with the implicit default - matching the resolver
+        # key granularity used for history rows.
+        key = (host, port, tls_server_name or host)
         if key in seen:
             if filtered is not None:
                 filtered.append(
@@ -75,10 +96,30 @@ def normalize_dot_candidates(
     return result
 
 
+def _valid_bootstrap(addrs: list[str], family: int) -> bool:
+    """Every bootstrap address must parse as an IP of the given family."""
+    for addr in addrs:
+        try:
+            ip = ipaddress.ip_address(addr)
+        except ValueError:
+            return False
+        if ip.version != family:
+            return False
+    return True
+
+
 def _is_hostname(host: str) -> bool:
     try:
         ipaddress.ip_address(host)
         return False
+    except ValueError:
+        return bool(_HOSTNAME_RE.match(host))
+
+
+def _is_hostname_or_ip(host: str) -> bool:
+    try:
+        ipaddress.ip_address(host)
+        return True
     except ValueError:
         return bool(_HOSTNAME_RE.match(host))
 

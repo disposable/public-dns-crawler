@@ -48,6 +48,7 @@ async def _resolve_dot_addresses(
     candidate: Candidate,
     timeout_s: float,
     addr_cache: dict[str, list[str]] | None,
+    addr_locks: dict[str, asyncio.Lock] | None = None,
 ) -> list[str]:
     """Return connect addresses for a DoT candidate.
 
@@ -55,6 +56,8 @@ async def _resolve_dot_addresses(
     hostname is resolved once through the system resolver. Results are
     cached so per-probe latency measurements exclude DNS resolution time,
     and the cache order is rotated by the caller for address coverage.
+    ``addr_locks`` serializes cold-miss resolutions so concurrent probes for
+    the same host do not stampede the resolver.
     """
     host = candidate.host
     if _is_ip_literal(host):
@@ -63,17 +66,32 @@ async def _resolve_dot_addresses(
     if addr_cache is not None and cache_key in addr_cache:
         return addr_cache[cache_key]
 
+    if addr_locks is None:
+        return await _resolve_dot_addresses_uncached(candidate, timeout_s, addr_cache)
+
+    lock = addr_locks.setdefault(cache_key, asyncio.Lock())
+    async with lock:
+        if addr_cache is not None and cache_key in addr_cache:
+            return addr_cache[cache_key]
+        return await _resolve_dot_addresses_uncached(candidate, timeout_s, addr_cache)
+
+
+async def _resolve_dot_addresses_uncached(
+    candidate: Candidate,
+    timeout_s: float,
+    addr_cache: dict[str, list[str]] | None,
+) -> list[str]:
     addresses = list(candidate.bootstrap_ipv4) + list(candidate.bootstrap_ipv6)
     if not addresses:
         resolver = dns.asyncresolver.Resolver()
         for rdtype in ("A", "AAAA"):
             try:
-                answer = await resolver.resolve(host, rdtype, lifetime=timeout_s)
+                answer = await resolver.resolve(candidate.host, rdtype, lifetime=timeout_s)
                 addresses.extend(rdata.address for rdata in answer)
             except Exception:
                 continue
     if addr_cache is not None:
-        addr_cache[cache_key] = addresses
+        addr_cache[_dot_addr_cache_key(candidate)] = addresses
     return addresses
 
 
@@ -107,11 +125,12 @@ async def _query_dot_candidate(
     msg: dns.message.Message,
     timeout_s: float,
     addr_cache: dict[str, list[str]] | None,
+    addr_locks: dict[str, asyncio.Lock] | None = None,
     *,
     ssl_context: ssl.SSLContext | None = None,
 ) -> tuple[dns.message.Message, float]:
     """Query a DoT candidate, resolving hostname endpoints to addresses."""
-    addresses = await _resolve_dot_addresses(candidate, timeout_s, addr_cache)
+    addresses = await _resolve_dot_addresses(candidate, timeout_s, addr_cache, addr_locks)
     if not addresses:
         raise dns.exception.DNSException(f"cannot resolve DoT host {candidate.host!r}")
     # Rotate through resolved addresses across calls for coverage.
@@ -148,6 +167,7 @@ async def _probe_positive_dot(
     baseline_resolvers: list[str],
     baseline_cache: dict[tuple[str, str], list[str]],
     addr_cache: dict[str, list[str]] | None = None,
+    addr_locks: dict[str, asyncio.Lock] | None = None,
     ssl_context: ssl.SSLContext | None = None,
 ) -> ProbeResult:
     probe_name = f"dot:positive:{entry.label}"
@@ -160,6 +180,7 @@ async def _probe_positive_dot(
             msg,
             timeout_s,
             addr_cache,
+            addr_locks,
             ssl_context=ssl_context,
         )
     except Exception as exc:
@@ -185,6 +206,7 @@ async def _probe_nxdomain_dot(
     candidate: Candidate,
     timeout_s: float,
     addr_cache: dict[str, list[str]] | None = None,
+    addr_locks: dict[str, asyncio.Lock] | None = None,
     ssl_context: ssl.SSLContext | None = None,
 ) -> ProbeResult:
     probe_name = f"dot:nxdomain:{entry.label}"
@@ -197,6 +219,7 @@ async def _probe_nxdomain_dot(
             msg,
             timeout_s,
             addr_cache,
+            addr_locks,
             ssl_context=ssl_context,
         )
     except Exception as exc:
@@ -231,6 +254,7 @@ async def validate_dot_candidate(
     baseline_resolvers = baseline_resolvers or ["1.1.1.1", "9.9.9.9", "8.8.8.8"]
     baseline_cache = baseline_cache or {}
     addr_cache: dict[str, list[str]] = {}
+    addr_locks: dict[str, asyncio.Lock] = {}
 
     coros = []
     for _ in range(rounds):
@@ -243,9 +267,14 @@ async def validate_dot_candidate(
                     baseline_resolvers,
                     baseline_cache,
                     addr_cache,
+                    addr_locks,
                     ssl_context,
                 )
             )
         for entry in corpus.nxdomain:
-            coros.append(_probe_nxdomain_dot(entry, candidate, timeout_s, addr_cache, ssl_context))
+            coros.append(
+                _probe_nxdomain_dot(
+                    entry, candidate, timeout_s, addr_cache, addr_locks, ssl_context
+                )
+            )
     return list(await asyncio.gather(*coros))
