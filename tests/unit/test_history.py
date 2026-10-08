@@ -1287,6 +1287,47 @@ class TestChangelog:
         assert len(changelog["status_changes"]) == 3
         assert changelog["truncated"] is True
 
+    def test_same_date_runs_use_deterministic_order(self, tmp_path) -> None:
+        """Identical run_date/run_started_at pairs fall back to run_id order."""
+        db_path = tmp_path / "history.duckdb"
+        day = date(2026, 1, 2)
+        stamp = datetime.combine(day, datetime.min.time(), tzinfo=UTC)
+        from resolver_inventory.history import RunMetadata
+
+        def meta(run_id: str) -> RunMetadata:
+            return RunMetadata(
+                run_date=day,
+                generated_at=stamp,
+                github_run_id=run_id,
+                repo_sha="repo-sha",
+                crawler_sha="crawler-sha",
+            )
+
+        with connect_history_db(db_path) as connection:
+            update_history(
+                connection,
+                meta("run-aaa"),
+                [_dns_result("1.1.1.1", "dns-udp", "accepted")],
+                [],
+            )
+            update_history(
+                connection,
+                meta("run-bbb"),
+                [
+                    _dns_result("1.1.1.1", "dns-udp", "accepted"),
+                    _dns_result("8.8.8.8", "dns-udp", "accepted"),
+                ],
+                [],
+            )
+            from resolver_inventory.history import compute_changelog
+
+            changelog = compute_changelog(connection)
+
+        assert changelog is not None
+        assert changelog["run_id"].startswith("run-bbb_")
+        assert changelog["previous_run_id"].startswith("run-aaa_")
+        assert changelog["added"] == ["dns-udp|8.8.8.8|53"]
+
     def test_readme_section_renders_changelog(self) -> None:
         section = render_stats_section(
             {

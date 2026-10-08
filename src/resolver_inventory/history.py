@@ -1158,7 +1158,7 @@ def compute_changelog(connection, *, max_entries: int = 200) -> dict[str, Any] |
         """
         SELECT run_id, run_date
         FROM runs
-        ORDER BY run_date DESC, run_started_at DESC
+        ORDER BY run_date DESC, run_started_at DESC, run_id DESC
         LIMIT 2
         """
     ).fetchall()

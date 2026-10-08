@@ -142,12 +142,15 @@ def _parse_dot_url(url: str) -> tuple[str, int, str | None]:
     A ``#name`` fragment carries the TLS authentication name for IP-literal
     endpoints (``tls://9.9.9.9#dns.quad9.net``), matching the convention
     used by the text exporter, Unbound, and systemd-resolved.
+
+    Returns ``("", 0, None)`` for malformed URLs so callers skip the row;
+    urlparse raises on unbalanced IPv6 brackets and invalid ports.
     """
-    parsed = urlparse(url)
-    host = parsed.hostname or ""
     try:
+        parsed = urlparse(url)
+        host = parsed.hostname or ""
         port = parsed.port or DEFAULT_DOT_PORT
     except ValueError:
-        port = DEFAULT_DOT_PORT
+        return "", 0, None
     tls_name = unquote(parsed.fragment).strip() if parsed.fragment else None
     return host, port, tls_name

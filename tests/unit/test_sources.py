@@ -188,6 +188,25 @@ class TestAdGuardDotSource:
         assert candidates[0].port == 853
         assert candidates[0].tls_server_name == "dns.quad9.net"
 
+    def test_malformed_urls_are_skipped(self, monkeypatch) -> None:
+        """Unbalanced IPv6 brackets and invalid ports must not crash parsing."""
+        body = """
+### Provider
+
+| DNS-over-TLS | `tls://[::1` | |
+| DNS-over-TLS | `tls://dns.example.com:99999` | |
+| DNS-over-TLS | `tls://dns.example.com:abc` | |
+| DNS-over-TLS | `tls://good.example.com` | |
+"""
+
+        def fake_urlopen(url: str, timeout: int = 30) -> _FakeResponse:
+            return _FakeResponse(body)
+
+        monkeypatch.setattr(urllib.request, "urlopen", fake_urlopen)
+
+        candidates = AdGuardDotSource(SourceEntry(type="adguard")).candidates()
+        assert [c.host for c in candidates] == ["good.example.com"]
+
 
 class TestManualDotSource:
     def test_parses_endpoints_file(self, tmp_path) -> None:
