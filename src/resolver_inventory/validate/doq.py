@@ -7,7 +7,6 @@ import ssl
 import time
 
 import dns.asyncquery
-import dns.asyncresolver
 import dns.exception
 import dns.message
 import dns.rcode

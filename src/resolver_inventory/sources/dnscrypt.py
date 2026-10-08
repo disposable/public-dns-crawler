@@ -110,7 +110,7 @@ def _split_host_port(text: str, default_port: int) -> tuple[str, int]:
 
 
 class _Stamp:
-    __slots__ = ("addr", "bootstrap", "hostname", "path", "port", "proto")
+    __slots__ = ("addr", "hostname", "path", "port", "proto")
 
     def __init__(
         self,
@@ -119,14 +119,12 @@ class _Stamp:
         hostname: str,
         port: int,
         path: str,
-        bootstrap: list[str],
     ) -> None:
         self.proto = proto
         self.addr = addr
         self.hostname = hostname
         self.port = port
         self.path = path
-        self.bootstrap = bootstrap
 
 
 def _decode_stamp(encoded: str) -> _Stamp:
@@ -145,7 +143,7 @@ def _decode_stamp(encoded: str) -> _Stamp:
     if proto == PROTO_PLAIN:
         addr_field, off = _lp(raw, off)
         host, port = _split_host_port(_text(addr_field), 53)
-        return _Stamp(proto, host, "", port, "", [])
+        return _Stamp(proto, host, "", port, "")
 
     if proto in (PROTO_DOH, PROTO_DOT, PROTO_DOQ):
         addr_field, off = _lp(raw, off)
@@ -170,7 +168,7 @@ def _decode_stamp(encoded: str) -> _Stamp:
         # not propagate them into Candidate.bootstrap_*.
         if off < len(raw):
             _vlp(raw, off)
-        return _Stamp(proto, addr, hostname, port, path, [])
+        return _Stamp(proto, addr, hostname, port, path)
 
     raise _StampError(f"unsupported protocol id 0x{proto:02x}")
 
