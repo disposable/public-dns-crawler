@@ -451,14 +451,14 @@ def cmd_split_candidates(args: argparse.Namespace) -> int:
     output_dir.mkdir(parents=True, exist_ok=True)
     shard_count = args.shards
     total = len(candidates)
-    base_size, remainder = divmod(total, shard_count)
     files: list[str] = []
-    start = 0
 
+    # Strided assignment: candidates are sorted by transport, so contiguous
+    # chunks would concentrate all DoH/DoT/DoQ endpoints in the last shards
+    # and skew wall-clock per shard. Dealing round-robin keeps shard sizes
+    # within one candidate and mixes transports evenly.
     for shard_index in range(shard_count):
-        shard_size = base_size + (1 if shard_index < remainder else 0)
-        shard_candidates = candidates[start : start + shard_size]
-        start += shard_size
+        shard_candidates = candidates[shard_index::shard_count]
         shard_path = output_dir / f"chunk-{shard_index:02d}.json"
         write_json(shard_path, [candidate_to_dict(candidate) for candidate in shard_candidates])
         files.append(shard_path.name)

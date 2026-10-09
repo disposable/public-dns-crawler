@@ -531,6 +531,53 @@ class TestShardCommands:
         ]
         assert chunk_sizes == [2, 2, 1]
 
+    def test_split_candidates_interleaves_transports(self, tmp_path: Path) -> None:
+        """Sorted, transport-grouped input must spread transports across shards."""
+        record = {
+            "provider": None,
+            "source": "test",
+            "endpoint_url": None,
+            "port": 53,
+            "path": None,
+            "bootstrap_ipv4": [],
+            "bootstrap_ipv6": [],
+            "tls_server_name": None,
+            "metadata": {},
+        }
+        input_path = tmp_path / "candidates.json"
+        input_path.write_text(
+            json.dumps(
+                [
+                    {**record, "transport": transport, "host": f"192.0.2.{index}"}
+                    for index, transport in enumerate(["dns-udp"] * 6 + ["dot"] * 2)
+                ]
+            ),
+            encoding="utf-8",
+        )
+
+        rc = cmd_split_candidates(
+            argparse.Namespace(
+                config=None,
+                input=str(input_path),
+                output_dir=str(tmp_path / "chunks"),
+                shards=2,
+            )
+        )
+
+        assert rc == 0
+        transports_per_shard = [
+            sorted(
+                {
+                    entry["transport"]
+                    for entry in json.loads(
+                        (tmp_path / "chunks" / f"chunk-{index:02d}.json").read_text()
+                    )
+                }
+            )
+            for index in range(2)
+        ]
+        assert transports_per_shard == [["dns-udp", "dot"], ["dns-udp", "dot"]]
+
     def test_materialize_results_writes_outputs(self, tmp_path: Path) -> None:
         filtered_path = tmp_path / "filtered.json"
         filtered_path.write_text(
